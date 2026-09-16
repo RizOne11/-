@@ -1,6 +1,7 @@
 name: PUMA Multimarket Smoke
 
-# Active broad-market sources. Rozetka frozen; Allo/Comfy paused; Foxtrot/Kasta dropped.
+# Active sources: Prom, Epicentr, Hotline plus category-specific Allo and Comfy.
+# Rozetka frozen; Zakupka/WEB_SHOPS paused for later; Foxtrot/Kasta dropped.
 on:
   workflow_dispatch:
   push:
@@ -23,58 +24,39 @@ jobs:
         run: pip install -e . pytest pytest-asyncio
       - name: Tests
         run: pytest -q
-      - name: Live broad-market smoke
+      - name: Live five-source smoke
         run: |
           python - <<'PY'
           import asyncio, json
           from collections import Counter
           from puma_scouts.models import ProductMission, Verdict
           from puma_scouts.scouts.epicentr import EpicentrScout
-          from puma_scouts.scouts.catalog import PromScout, ZakupkaScout, HotlineScout
+          from puma_scouts.scouts.catalog import PromScout, HotlineScout, AlloScout, ComfyScout
+
           mission=ProductMission(article='SMOKE-CONTROL',source_data={'name':'Монитор Xiaomi Redmi A27Q 2025 P27QCB-RA 2560x1440 2K IPS 100 Гц 27 Черный','brand':'Xiaomi','model':'P27QCB-RA'})
-          scouts=[EpicentrScout(timeout=15,max_candidates_per_query=12),PromScout(timeout=15,max_candidates_per_query=12),ZakupkaScout(timeout=15,max_candidates_per_query=12),HotlineScout(timeout=15,max_candidates_per_query=12)]
-          async def one(s):
-            r=await s.scan(mission); p=sorted([x for x in r.offers if x.verdict==Verdict.PASS],key=lambda x:x.score,reverse=True); prices=Counter(str(x.offer.price) for x in p if x.offer.price is not None)
-            return {'marketplace':s.marketplace.value,'health':r.health.value,'candidates':r.candidates_collected,'pass_count':len(p),'price_groups':dict(prices),'best':None if not p else {'title':p[0].offer.title,'price':str(p[0].offer.price) if p[0].offer.price else None,'url':str(p[0].offer.url),'score':p[0].score},'errors':r.errors[:3]}
-          async def main(): print('PUMA_MULTIMARKET_RESULTS='+json.dumps(await asyncio.gather(*(one(s) for s in scouts)),ensure_ascii=False))
-          asyncio.run(main())
-          PY
-      - name: Probe Zakupka and Google discovery
-        run: |
-          python - <<'PY'
-          import asyncio,re
-          from urllib.parse import quote_plus,urlsplit,parse_qs
-          import httpx
-          from bs4 import BeautifulSoup
-          query='Xiaomi Redmi A27Q 2025 P27QCB-RA'
-          zakupka=[
-            'https://zakupka.com/uk/search/?q='+quote_plus(query),
-            'https://zakupka.com/search/?q='+quote_plus(query),
-            'https://zakupka.com/uk/search?search_term='+quote_plus(query),
+          scouts=[
+            EpicentrScout(timeout=15,max_candidates_per_query=12),
+            PromScout(timeout=15,max_candidates_per_query=12),
+            HotlineScout(timeout=15,max_candidates_per_query=12),
+            AlloScout(timeout=15,max_candidates_per_query=12),
+            ComfyScout(timeout=15,max_candidates_per_query=12),
           ]
-          google='https://www.google.com/search?hl=uk&gl=ua&num=20&q='+quote_plus('"Xiaomi Redmi A27Q 2025" "P27QCB-RA" -site:prom.ua -site:epicentrk.ua -site:hotline.ua -site:rozetka.com.ua -site:zakupka.com')
-          blocked=('google.','gstatic.','googleusercontent.','youtube.','facebook.','instagram.','prom.ua','epicentrk.ua','hotline.ua','rozetka.com.ua','zakupka.com')
+
+          async def one(s):
+            r=await s.scan(mission)
+            p=sorted([x for x in r.offers if x.verdict==Verdict.PASS],key=lambda x:x.score,reverse=True)
+            prices=Counter(str(x.offer.price) for x in p if x.offer.price is not None)
+            return {
+              'marketplace':s.marketplace.value,
+              'health':r.health.value,
+              'candidates':r.candidates_collected,
+              'pass_count':len(p),
+              'price_groups':dict(prices),
+              'offers':[{'title':x.offer.title,'price':str(x.offer.price) if x.offer.price else None,'url':str(x.offer.url),'score':x.score} for x in p],
+              'errors':r.errors[:3],
+            }
+
           async def main():
-            headers={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36','Accept-Language':'uk-UA,uk;q=0.9,en;q=0.8'}
-            async with httpx.AsyncClient(timeout=15,follow_redirects=True,headers=headers) as c:
-              for u in zakupka:
-                try:
-                  r=await c.get(u); text=r.text.replace('\\/','/'); links=[]
-                  for x in re.findall(r'https?://[^\"\'<>\\\s]+|/[^\"\'<>\\\s]+',text):
-                    if 'zakupka.com' in x or x.startswith('/'):
-                      if any(k in x.lower() for k in ('search','catalog','product','tovar','p/','.html')): links.append(x[:250])
-                  print('PUMA_ZAKUPKA_PROBE',r.status_code,len(text),str(r.url),'links=',list(dict.fromkeys(links))[:15])
-                except Exception as e: print('PUMA_ZAKUPKA_PROBE ERROR',type(e).__name__,e)
-              try:
-                r=await c.get(google); text=r.text.replace('\\/','/'); found={}
-                for a in BeautifulSoup(text,'html.parser').find_all('a',href=True):
-                  x=a['href']
-                  if x.startswith('/url?'):
-                    x=parse_qs(urlsplit(x).query).get('q',[''])[0]
-                  if not x.startswith('http'): continue
-                  h=urlsplit(x).netloc.lower().removeprefix('www.')
-                  if h and not any(b in h for b in blocked): found.setdefault(h,x)
-                print('PUMA_GOOGLE_PROBE',r.status_code,len(text),str(r.url),'shops=',list(found.items())[:20])
-              except Exception as e: print('PUMA_GOOGLE_PROBE ERROR',type(e).__name__,e)
+            print('PUMA_MULTIMARKET_RESULTS='+json.dumps(await asyncio.gather(*(one(s) for s in scouts)),ensure_ascii=False))
           asyncio.run(main())
           PY
