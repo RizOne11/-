@@ -5,7 +5,7 @@ from puma_scouts.scouts.epicentr import EpicentrScout, _offer_from_page
 
 
 def test_epicentr_product_page_parses_market_data():
-    html = '''
+    html = r'''
     <html><head>
       <meta property="og:title" content="Монітор Redmi A27Q 2025 27&quot;">
       <script type="application/ld+json">
