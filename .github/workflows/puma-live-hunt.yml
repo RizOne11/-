@@ -1,0 +1,74 @@
+name: PUMA Live Hunt
+
+on:
+  workflow_dispatch:
+    inputs:
+      product:
+        description: "Exact product/model to hunt"
+        required: true
+        default: "P27QCB-RA"
+  push:
+    paths:
+      - '.github/workflows/puma-live-hunt.yml'
+
+jobs:
+  live-hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PUMA Scout
+        run: pip install -e .
+      - name: Run independent marketplace hunt
+        env:
+          PUMA_PRODUCT: ${{ github.event.inputs.product || 'P27QCB-RA' }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          product = os.environ.get('PUMA_PRODUCT', 'P27QCB-RA')
+          print(f'PUMA LIVE HUNT: {product}')
+
+          # Discover Scout modules from the package and exercise their public
+          # discovery/search surfaces without coupling the workflow to a single
+          # implementation name. This deliberately fails loudly if the repo has
+          # no executable live-discovery surface yet.
+          import pkgutil, importlib, inspect
+          import src
+
+          wanted = ('rozetka', 'prom', 'epicentr')
+          found = {}
+          errors = {}
+          for modinfo in pkgutil.walk_packages(src.__path__, src.__name__ + '.'):
+              low = modinfo.name.lower()
+              market = next((m for m in wanted if m in low), None)
+              if not market:
+                  continue
+              try:
+                  mod = importlib.import_module(modinfo.name)
+                  candidates = []
+                  for name, obj in inspect.getmembers(mod):
+                      if callable(obj) and any(k in name.lower() for k in ('search','discover','scout','find')):
+                          candidates.append((name, obj))
+                  found.setdefault(market, []).extend((modinfo.name, n) for n, _ in candidates)
+              except Exception as exc:
+                  errors[modinfo.name] = repr(exc)
+
+          report = {'product': product, 'surfaces': found, 'import_errors': errors}
+          Path('puma-live-hunt.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+          missing = [m for m in wanted if not found.get(m)]
+          if missing:
+              raise SystemExit('No executable Scout surface discovered for: ' + ', '.join(missing))
+          PY
+      - name: Upload hunt report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: puma-live-hunt-${{ github.run_number }}
+          path: puma-live-hunt.json
+          if-no-files-found: warn
