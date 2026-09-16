@@ -1,28 +1,50 @@
-# PUMA Scouts — «Обратная фармилка»
+# 🐆 PUMA — Product Intelligence
 
-Proof-of-concept для трёх независимых marketplace-разведчиков:
+Production baseline: **Prom + Epicentr + Hotline + independent Ukrainian WEB_SHOPS**.
 
-- Prom.ua Scout
-- Rozetka Scout
-- Epicentr Scout
+PUMA takes an Excel product list, searches for the same physical products, validates candidates, preserves accepted offer URLs/prices, and exports an Excel report with offer-level data and price groups.
 
-## Цель v0.1
+## Найпростіший запуск
 
-Доказать на реальных SKU, что система способна находить максимально полный набор предложений конкретного физического товара на каждом marketplace, сохранять доказательства по каждому offer и не смешивать очевидно разные модификации.
+### Windows
+1. Download/clone the repository.
+2. Double-click `run_puma.bat`.
+3. Browser opens PUMA at `http://localhost:8501`.
+4. Upload `.xlsx` and press **🐆 Аналізувати**.
+5. Download `PUMA_result.xlsx`.
 
-## Базовые правила
+### macOS
+Run `run_puma.command` (first launch may require permission to execute).
 
-1. `article` пользователя — неизменяемый ключ продукта.
-2. Scout получает всю доступную строку исходных данных, а не только название/артикул.
-3. Цена пользователя не участвует в определении идентичности товара.
-4. Сначала высокая полнота поиска (recall), затем предварительная валидация.
-5. Результат валидации: `PASS`, `CONFLICT`, `REJECT`.
-6. `CONFLICT` никогда не выбрасывается молча.
-7. `ERROR` никогда не превращается в `NOT_FOUND`.
-8. Внутри храним отдельные seller offers; ценовые «полки» — производное представление.
-9. Каждый marketplace может иметь собственный acquisition adapter.
-10. Никакой ценовой аналитики до подтверждения качества Scout PoC.
+### Manual
+```bash
+pip install -e .
+streamlit run src/puma_scouts/app.py
+```
 
-## PoC gate
+## Excel input
 
-Начинаем с контрольного набора SKU и сравниваем автоматический результат с ручным ground truth. Цель первого этапа — проверить полноту, стабильность и стоимость сбора данных до масштабирования.
+The first worksheet is used. PUMA recognizes common Ukrainian/Russian/English column aliases for product name, article/SKU, brand and model. Product name is required; article is optional and will be generated when absent.
+
+## Output
+
+`Offers` — accepted marketplace/shop cards with product, marketplace, title, price, URL, match score and availability.
+
+`Price summary` — product + marketplace + price → number of accepted cards.
+
+## Matching rules
+
+- User article is an internal immutable key and is **not** used as the marketplace search query.
+- User price does not determine product identity.
+- Missing attributes are not automatically contradictions.
+- Explicit contradictory identity/specification data can reject a candidate.
+- Prom supports relaxed descriptive matching when model fields are absent.
+
+## Source state
+
+- Production: Prom, Epicentr, Hotline, WEB_SHOPS.
+- Rozetka: frozen.
+- Allo / Comfy: paused.
+- Foxtrot / Kasta / Zakupka: outside current production baseline.
+
+Seasonality / demand scoring is the next additive layer and must not break the verified marketplace baseline.
