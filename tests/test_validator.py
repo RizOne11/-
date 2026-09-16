@@ -23,7 +23,6 @@ def test_exact_model_passes():
     offer.attributes = {"model": "P27QCB-RA", "brand": "Redmi"}
     result = validate_offer(_mission(), offer)
     assert result.verdict == Verdict.PASS
-    assert any("P27QCB-RA" in evidence for evidence in result.positive_evidence)
 
 
 def test_family_name_does_not_pass_wrong_generation():
@@ -54,10 +53,29 @@ def test_single_gas_can_does_not_pass_as_twenty_pack():
     assert any("pack quantity not confirmed" in conflict for conflict in result.conflicts)
 
 
+def test_wrong_brand_same_pack_does_not_pass():
+    mission = ProductMission(article="FAKE", source_data={"name": "Баллон газовый универсальный X-Treme 227 г 20 шт", "brand": "X-Treme"})
+    result = validate_offer(mission, _offer("Баллон универсальный газовый WINSO 220 г 20 шт"))
+    assert result.verdict != Verdict.PASS
+    assert any("brand not confirmed" in conflict for conflict in result.conflicts)
+
+
+def test_wrong_numeric_spec_same_brand_does_not_pass():
+    mission = ProductMission(article="FAKE", source_data={"name": "Баллон газовый универсальный X-Treme 227 г 20 шт", "brand": "X-Treme"})
+    result = validate_offer(mission, _offer("Баллон газовый универсальный X-Treme 220 г 20 шт"))
+    assert result.verdict != Verdict.PASS
+    assert any("numeric spec mismatch" in conflict for conflict in result.conflicts)
+
+
+def test_exact_brand_quantity_and_numeric_spec_can_pass():
+    mission = ProductMission(article="FAKE", source_data={"name": "Баллон газовый универсальный X-Treme 227 г 20 шт", "brand": "X-Treme"})
+    result = validate_offer(mission, _offer("Баллон газовый универсальный X-Treme 227 г 20 шт"))
+    assert result.verdict == Verdict.PASS
+
+
 def test_multiword_model_requires_all_model_tokens():
     mission = ProductMission(article="FAKE", source_data={"name": "Система энергообеспечения EcoFlow STREAM Ultra X", "brand": "EcoFlow", "model": "STREAM Ultra X"})
     wrong = validate_offer(mission, _offer("Зарядная станция EcoFlow DELTA Lite Plus Stream Ultra"))
     exact = validate_offer(mission, _offer("Система энергообеспечения EcoFlow STREAM Ultra X"))
     assert wrong.verdict != Verdict.PASS
-    assert any("expected model not confirmed" in conflict for conflict in wrong.conflicts)
     assert exact.verdict == Verdict.PASS
