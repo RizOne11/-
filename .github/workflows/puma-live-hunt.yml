@@ -8,8 +8,7 @@ on:
         required: true
         default: "P27QCB-RA"
   push:
-    branches:
-      - main
+    branches: [main]
 
 jobs:
   live-hunt:
@@ -21,7 +20,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install PUMA Scout
-        run: pip install -e .
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
       - name: Run real Rozetka hunt
         env:
           PUMA_PRODUCT: ${{ github.event.inputs.product || 'P27QCB-RA' }}
@@ -33,6 +34,7 @@ jobs:
           from puma_scouts.scouts.rozetka import RozetkaScout
 
           product = os.environ.get('PUMA_PRODUCT', 'P27QCB-RA')
+          print(f'PUMA LIVE HUNT START product={product}')
 
           async def main():
               mission = ProductMission(article=product, source_data={"model": product})
@@ -41,6 +43,7 @@ jobs:
               Path('puma-live-hunt.json').write_text(
                   json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8'
               )
+              print('PUMA LIVE HUNT RESULT')
               print(json.dumps(payload, ensure_ascii=False, indent=2))
 
           asyncio.run(main())
