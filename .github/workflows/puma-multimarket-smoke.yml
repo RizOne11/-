@@ -1,7 +1,7 @@
 name: PUMA Multimarket Smoke
 
-# Active: Prom, Epicentr, Zakupka, Hotline + independent Ukrainian web shops.
-# Rozetka frozen; Allo/Comfy paused; Foxtrot/Kasta dropped.
+# PRODUCTION BASELINE (verified live): Prom, Epicentr, Hotline + independent Ukrainian web shops.
+# Zakupka removed from production; Rozetka frozen; Allo/Comfy paused; Foxtrot/Kasta dropped.
 on:
   workflow_dispatch:
   push:
@@ -24,21 +24,20 @@ jobs:
         run: pip install -e . pytest pytest-asyncio
       - name: Tests
         run: pytest -q
-      - name: Live active-source smoke
+      - name: Live production-source smoke
         run: |
           python - <<'PY'
           import asyncio, json
           from collections import Counter
           from puma_scouts.models import ProductMission, Verdict
           from puma_scouts.scouts.epicentr import EpicentrScout
-          from puma_scouts.scouts.catalog import PromScout, ZakupkaScout, HotlineScout
+          from puma_scouts.scouts.catalog import PromScout, HotlineScout
           from puma_scouts.scouts.web_shops import WebShopsScout
 
           mission=ProductMission(article='SMOKE-CONTROL',source_data={'name':'Монитор Xiaomi Redmi A27Q 2025 P27QCB-RA 2560x1440 2K IPS 100 Гц 27 Черный','brand':'Xiaomi','model':'P27QCB-RA'})
           scouts=[
             EpicentrScout(timeout=15,max_candidates_per_query=12),
             PromScout(timeout=15,max_candidates_per_query=12),
-            ZakupkaScout(timeout=15,max_candidates_per_query=12),
             HotlineScout(timeout=15,max_candidates_per_query=12),
             WebShopsScout(timeout=15,max_candidates_per_query=20,max_per_domain=2),
           ]
@@ -50,6 +49,6 @@ jobs:
             return {'marketplace':s.marketplace.value,'health':r.health.value,'candidates':r.candidates_collected,'pass_count':len(p),'price_groups':dict(prices),'offers':[{'title':x.offer.title,'price':str(x.offer.price) if x.offer.price else None,'url':str(x.offer.url),'domain':x.offer.attributes.get('source_domain'),'score':x.score} for x in p],'errors':r.errors[:3]}
 
           async def main():
-            print('PUMA_MULTIMARKET_RESULTS='+json.dumps(await asyncio.gather(*(one(s) for s in scouts)),ensure_ascii=False))
+            print('PUMA_PRODUCTION_RESULTS='+json.dumps(await asyncio.gather(*(one(s) for s in scouts)),ensure_ascii=False))
           asyncio.run(main())
           PY
