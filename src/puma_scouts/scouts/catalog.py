@@ -56,16 +56,11 @@ def _jsonld_products(page: str) -> list[dict[str, Any]]:
 
 
 class CatalogScout(MarketplaceScout):
-    """Conservative JSON-LD product scout used for PUMA marketplace rollout.
-
-    It deliberately does not search by the supplier/source article. Candidate
-    pages are validated by the shared exact-product validator before PASS.
-    """
-
     marketplace: Marketplace
     host: str
     search_templates: tuple[str, ...]
     product_path_hints: tuple[str, ...] = ()
+    allow_subdomains = False
 
     def __init__(self, *, timeout: float = 15.0, max_candidates_per_query: int = 20) -> None:
         self.timeout = timeout
@@ -85,10 +80,14 @@ class CatalogScout(MarketplaceScout):
                 useful.append(q)
         return useful
 
+    def _host_matches(self, candidate_host: str) -> bool:
+        expected = self.host.casefold().removeprefix("www.")
+        actual = candidate_host.casefold().removeprefix("www.")
+        return actual == expected or (self.allow_subdomains and actual.endswith("." + expected))
+
     def _is_candidate(self, url: str) -> bool:
         p = urlsplit(url)
-        host = p.netloc.casefold().removeprefix("www.")
-        if host != self.host.removeprefix("www."):
+        if not self._host_matches(p.netloc):
             return False
         if not p.path or p.path == "/":
             return False
@@ -179,28 +178,36 @@ class CatalogScout(MarketplaceScout):
             candidates_seen=seen, candidates_collected=len(unique), duplicates_removed=max(0, seen-len(unique)), search_rounds=len(queries), errors=errors, offers=validated)
 
 
+class PromScout(CatalogScout):
+    marketplace = Marketplace.PROM
+    host = "prom.ua"
+    allow_subdomains = True
+    product_path_hints = ("/p", "/m")
+    search_templates = ("https://prom.ua/ua/search?search_term={q}", "https://prom.ua/ua/search?search_term={q}&sort=score")
+
+
 class AlloScout(CatalogScout):
     marketplace = Marketplace.ALLO
     host = "allo.ua"
-    search_templates = ("https://allo.ua/ua/catalogsearch/result/?q={q}",)
+    search_templates = ("https://allo.ua/ua/catalogsearch/result/?q={q}", "https://allo.ua/ua/catalogsearch/result/?q={q}&cat=")
 
 
 class FoxtrotScout(CatalogScout):
     marketplace = Marketplace.FOXTROT
     host = "foxtrot.com.ua"
-    search_templates = ("https://www.foxtrot.com.ua/uk/search?query={q}",)
+    search_templates = ("https://www.foxtrot.com.ua/uk/search?query={q}", "https://www.foxtrot.com.ua/uk/search?search={q}")
 
 
 class ComfyScout(CatalogScout):
     marketplace = Marketplace.COMFY
     host = "comfy.ua"
-    search_templates = ("https://comfy.ua/ua/search/?q={q}",)
+    search_templates = ("https://comfy.ua/ua/search/?q={q}", "https://comfy.ua/ua/search?q={q}")
 
 
 class KastaScout(CatalogScout):
     marketplace = Marketplace.KASTA
     host = "kasta.ua"
-    search_templates = ("https://kasta.ua/uk/search/?q={q}",)
+    search_templates = ("https://kasta.ua/uk/search/?q={q}", "https://kasta.ua/uk/search?q={q}")
 
 
 class HotlineScout(CatalogScout):
