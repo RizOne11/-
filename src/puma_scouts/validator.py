@@ -41,9 +41,16 @@ def _explicit_model(mission: ProductMission) -> str | None:
     return None
 
 
+def _explicit_brand(mission: ProductMission) -> str | None:
+    for key, value in mission.source_data.items():
+        if str(key).casefold() in {"brand", "manufacturer", "vendor"}:
+            text = str(value or "").strip()
+            if text and _norm(text) not in {"no brand", "nobrand", "без бренда", "без бренду"}:
+                return text
+    return None
+
+
 def _model_tokens(value: str) -> list[str]:
-    # Model tokens are identity-bearing, including one-character suffixes
-    # such as X/S/2. Do not apply ordinary search-token length filtering.
     return [t for t in _norm(value).split() if t]
 
 
@@ -57,6 +64,12 @@ def _model_match(expected: str | None, offer_text: str) -> bool:
     parts = _model_tokens(expected)
     offer_norm = _norm(offer_text)
     return len(parts) >= 2 and all(re.search(rf"\b{re.escape(part)}\b", offer_norm) for part in parts)
+
+
+def _brand_match(expected: str | None, offer_text: str) -> bool:
+    if not expected:
+        return True
+    return bool(_compact(expected) and _compact(expected) in _compact(offer_text))
 
 
 _TYPE_GROUPS = {
@@ -109,6 +122,35 @@ def _quantity_conflict(source_text: str, offer_text: str) -> str | None:
     return None
 
 
+def _key_measurements(text: str) -> set[tuple[str, str]]:
+    norm = _norm(text)
+    aliases = {
+        "г": "g", "гр": "g", "g": "g",
+        "кг": "kg", "kg": "kg",
+        "вт": "w", "w": "w",
+        "мм": "mm", "mm": "mm",
+        "мл": "ml", "ml": "ml",
+    }
+    result: set[tuple[str, str]] = set()
+    for value, unit in re.findall(r"\b(\d+(?:[.,]\d+)?)\s*(кг|kg|гр|г|g|вт|w|мм|mm|мл|ml)\b", norm, re.I):
+        result.add((value.replace(",", "."), aliases[unit.casefold()]))
+    return result
+
+
+def _measurement_conflict(source_text: str, offer_text: str) -> str | None:
+    expected = _key_measurements(source_text)
+    if not expected:
+        return None
+    actual = _key_measurements(offer_text)
+    # Only reject when the candidate states the same kind of measurement but
+    # with a different value. Missing specs remain unknown rather than false.
+    for value, unit in expected:
+        actual_values = {v for v, u in actual if u == unit}
+        if actual_values and value not in actual_values:
+            return f"numeric spec mismatch: expected {value}{unit}, got {sorted(actual_values)}"
+    return None
+
+
 def validate_offer(mission: ProductMission, offer: Offer) -> ValidatedOffer:
     source_text = " ".join(str(v) for v in mission.source_data.values())
     offer_text = " ".join([offer.title, *[f"{k} {v}" for k, v in offer.attributes.items()]])
@@ -120,24 +162,30 @@ def validate_offer(mission: ProductMission, offer: Offer) -> ValidatedOffer:
     matched_ids = [i for i in identifiers if _strong_identifier(i) and _compact(i) and _compact(i) in _compact(offer_text)]
     expected_model = _explicit_model(mission)
     model_match = _model_match(expected_model, offer_text)
+    expected_brand = _explicit_brand(mission)
+    brand_match = _brand_match(expected_brand, offer_text)
     positive: list[str] = []
     conflicts: list[str] = []
 
     type_problem = _type_conflict(source_text, offer_text)
     quantity_problem = _quantity_conflict(source_text, offer_text)
-    if type_problem:
-        conflicts.append(type_problem)
-    if quantity_problem:
-        conflicts.append(quantity_problem)
+    measurement_problem = _measurement_conflict(source_text, offer_text)
+    brand_problem = None if brand_match else f"brand not confirmed: {expected_brand}"
+    for problem in (type_problem, quantity_problem, measurement_problem, brand_problem):
+        if problem:
+            conflicts.append(problem)
 
     if matched_ids:
         positive.append("strong identifier match: " + ", ".join(matched_ids[:4]))
     if model_match:
         positive.append("explicit model match: " + str(expected_model))
+    if expected_brand and brand_match:
+        positive.append("brand match: " + expected_brand)
     if overlap >= 0.35:
         positive.append(f"source token overlap={overlap:.2f}")
 
-    if type_problem or quantity_problem:
+    # Explicit identity conflicts override fuzzy similarity.
+    if type_problem or quantity_problem or measurement_problem or brand_problem:
         score = min(0.64, 0.20 + overlap)
         verdict = Verdict.CONFLICT if overlap >= 0.18 else Verdict.REJECT
     elif expected_model and not model_match:
