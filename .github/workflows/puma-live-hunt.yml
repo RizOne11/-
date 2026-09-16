@@ -8,8 +8,8 @@ on:
         required: true
         default: "P27QCB-RA"
   push:
-    paths:
-      - '.github/workflows/puma-live-hunt.yml'
+    branches:
+      - main
 
 jobs:
   live-hunt:
