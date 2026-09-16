@@ -1,14 +1,10 @@
 name: PUMA Live Hunt
 
 on:
-  workflow_dispatch:
-    inputs:
-      product:
-        description: "Exact product/model to hunt"
-        required: true
-        default: "P27QCB-RA"
   push:
-    branches: [main]
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   live-hunt:
@@ -25,7 +21,7 @@ jobs:
           pip install -e .
       - name: Run real Rozetka hunt
         env:
-          PUMA_PRODUCT: ${{ github.event.inputs.product || 'P27QCB-RA' }}
+          PUMA_PRODUCT: P27QCB-RA
         run: |
           python - <<'PY'
           import asyncio, json, os
@@ -33,7 +29,7 @@ jobs:
           from puma_scouts.models import ProductMission
           from puma_scouts.scouts.rozetka import RozetkaScout
 
-          product = os.environ.get('PUMA_PRODUCT', 'P27QCB-RA')
+          product = os.environ['PUMA_PRODUCT']
           print(f'PUMA LIVE HUNT START product={product}')
 
           async def main():
