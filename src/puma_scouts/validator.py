@@ -42,7 +42,9 @@ def _explicit_model(mission: ProductMission) -> str | None:
 
 
 def _model_tokens(value: str) -> list[str]:
-    return [t for t in _norm(value).split() if len(t) >= 2]
+    # Model tokens are identity-bearing, including one-character suffixes
+    # such as X/S/2. Do not apply ordinary search-token length filtering.
+    return [t for t in _norm(value).split() if t]
 
 
 def _model_match(expected: str | None, offer_text: str) -> bool:
@@ -52,14 +54,11 @@ def _model_match(expected: str | None, offer_text: str) -> bool:
     compact_offer = _compact(offer_text)
     if compact_expected and compact_expected in compact_offer:
         return True
-    # Multi-word commercial models such as "STREAM Ultra X" are meaningful
-    # even when they do not satisfy the alphanumeric strong-ID heuristic.
     parts = _model_tokens(expected)
-    return len(parts) >= 2 and all(re.search(rf"\b{re.escape(part)}\b", _norm(offer_text)) for part in parts)
+    offer_norm = _norm(offer_text)
+    return len(parts) >= 2 and all(re.search(rf"\b{re.escape(part)}\b", offer_norm) for part in parts)
 
 
-# Conservative product-family anchors. We only use them to reject obvious
-# cross-type false positives (case vs strap, hammer vs handle, etc.).
 _TYPE_GROUPS = {
     "case": {"футляр", "кейс", "органайзер", "чохол", "чехол"},
     "strap": {"ремінець", "ремешок", "браслет"},
@@ -138,13 +137,9 @@ def validate_offer(mission: ProductMission, offer: Offer) -> ValidatedOffer:
     if overlap >= 0.35:
         positive.append(f"source token overlap={overlap:.2f}")
 
-    # Hard identity conflicts override fuzzy similarity. This prevents a strap
-    # from becoming a watch case and a single item from matching a 20-pack.
     if type_problem or quantity_problem:
         score = min(0.64, 0.20 + overlap)
         verdict = Verdict.CONFLICT if overlap >= 0.18 else Verdict.REJECT
-    # Any explicitly supplied model/MPN must be confirmed, including readable
-    # multi-word models such as STREAM Ultra X.
     elif expected_model and not model_match:
         if overlap >= 0.18:
             score = min(0.64, 0.20 + overlap)
