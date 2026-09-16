@@ -52,6 +52,11 @@ jobs:
               print("PUMA EPICENTR HUNT RESULT")
               print(json.dumps(payload, ensure_ascii=False, indent=2))
 
+              passes = [item for item in report.offers if item.verdict.value == "PASS"]
+              print("PUMA EXACT PASS COUNT:", len(passes))
+              for item in passes:
+                  print("PUMA EXACT PASS:", json.dumps(item.model_dump(mode="json"), ensure_ascii=False))
+
           asyncio.run(main())
           PY
       - name: Upload hunt report
