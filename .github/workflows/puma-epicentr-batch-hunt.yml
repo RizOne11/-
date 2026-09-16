@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/puma-epicentr-batch-hunt.yml'
 
+# trigger: 2026-09-16 real batch run
 jobs:
   batch-hunt:
     runs-on: ubuntu-latest
@@ -31,8 +32,6 @@ jobs:
           from puma_scouts.models import ProductMission
           from puma_scouts.scouts.epicentr import EpicentrScout
 
-          # Real products taken from the user's PUMA Excel. Supplier articles are
-          # intentionally NOT supplied to discovery; every mission gets a fake article.
           PRODUCTS = [
               {"name": "Молоток Polax слесарный c ручкой из дерева 1000 г DIN 1041", "brand": "Polax"},
               {"name": "Дорожный футляр для часов Clockhouse 97x157x68 мм Коричневый", "brand": "Clockhouse"},
@@ -69,7 +68,6 @@ jobs:
 
           async def main():
               results = []
-              # Sequential on purpose: be polite to Epicentr and make failures diagnosable.
               for i, product in enumerate(PRODUCTS, 1):
                   results.append(await scan_one(i, product))
               summary = {
