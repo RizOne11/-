@@ -1,7 +1,7 @@
 name: PUMA Multimarket Smoke
 
-# Active sources: Prom, Epicentr, Hotline plus category-specific Allo and Comfy.
-# Rozetka frozen; Zakupka/WEB_SHOPS paused for later; Foxtrot/Kasta dropped.
+# Active: Prom, Epicentr, Zakupka, Hotline + independent Ukrainian web shops.
+# Rozetka frozen; Allo/Comfy paused; Foxtrot/Kasta dropped.
 on:
   workflow_dispatch:
   push:
@@ -24,39 +24,66 @@ jobs:
         run: pip install -e . pytest pytest-asyncio
       - name: Tests
         run: pytest -q
-      - name: Live five-source smoke
+      - name: Live active-source smoke
         run: |
           python - <<'PY'
           import asyncio, json
           from collections import Counter
           from puma_scouts.models import ProductMission, Verdict
           from puma_scouts.scouts.epicentr import EpicentrScout
-          from puma_scouts.scouts.catalog import PromScout, HotlineScout, AlloScout, ComfyScout
+          from puma_scouts.scouts.catalog import PromScout, ZakupkaScout, HotlineScout
 
           mission=ProductMission(article='SMOKE-CONTROL',source_data={'name':'Монитор Xiaomi Redmi A27Q 2025 P27QCB-RA 2560x1440 2K IPS 100 Гц 27 Черный','brand':'Xiaomi','model':'P27QCB-RA'})
           scouts=[
             EpicentrScout(timeout=15,max_candidates_per_query=12),
             PromScout(timeout=15,max_candidates_per_query=12),
+            ZakupkaScout(timeout=15,max_candidates_per_query=12),
             HotlineScout(timeout=15,max_candidates_per_query=12),
-            AlloScout(timeout=15,max_candidates_per_query=12),
-            ComfyScout(timeout=15,max_candidates_per_query=12),
           ]
 
           async def one(s):
             r=await s.scan(mission)
             p=sorted([x for x in r.offers if x.verdict==Verdict.PASS],key=lambda x:x.score,reverse=True)
             prices=Counter(str(x.offer.price) for x in p if x.offer.price is not None)
-            return {
-              'marketplace':s.marketplace.value,
-              'health':r.health.value,
-              'candidates':r.candidates_collected,
-              'pass_count':len(p),
-              'price_groups':dict(prices),
-              'offers':[{'title':x.offer.title,'price':str(x.offer.price) if x.offer.price else None,'url':str(x.offer.url),'score':x.score} for x in p],
-              'errors':r.errors[:3],
-            }
+            return {'marketplace':s.marketplace.value,'health':r.health.value,'candidates':r.candidates_collected,'pass_count':len(p),'price_groups':dict(prices),'offers':[{'title':x.offer.title,'price':str(x.offer.price) if x.offer.price else None,'url':str(x.offer.url),'score':x.score} for x in p],'errors':r.errors[:3]}
 
           async def main():
             print('PUMA_MULTIMARKET_RESULTS='+json.dumps(await asyncio.gather(*(one(s) for s in scouts)),ensure_ascii=False))
           asyncio.run(main())
+          PY
+      - name: Probe independent Ukrainian shops
+        run: |
+          python - <<'PY'
+          import html, re
+          from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlsplit
+          import httpx
+          from bs4 import BeautifulSoup
+
+          q='"Xiaomi Redmi A27Q 2025" "P27QCB-RA"'
+          blocked=('prom.ua','epicentrk.ua','hotline.ua','rozetka.com.ua','zakupka.com','allo.ua','comfy.ua','foxtrot.com.ua','kasta.ua','google.com','bing.com','duckduckgo.com','brave.com','youtube.com','facebook.com','instagram.com','tiktok.com')
+          engines=(
+            ('ddg',f'https://html.duckduckgo.com/html/?q={quote_plus(q)}'),
+            ('bing',f'https://www.bing.com/search?q={quote_plus(q)}&count=30&setlang=uk'),
+            ('brave',f'https://search.brave.com/search?q={quote_plus(q)}&source=web'),
+          )
+          headers={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36','Accept-Language':'uk-UA,uk;q=0.9,en;q=0.6'}
+          found={}
+          with httpx.Client(timeout=15,follow_redirects=True,headers=headers) as c:
+            for engine,url in engines:
+              try:
+                text=c.get(url).text
+              except Exception as e:
+                print('PUMA_WEB_ENGINE',engine,'ERROR',type(e).__name__); continue
+              soup=BeautifulSoup(text,'html.parser'); before=len(found)
+              for a in soup.find_all('a',href=True):
+                raw=html.unescape(a['href']); absolute=urljoin(url,raw); p=urlsplit(absolute)
+                if 'duckduckgo.com' in p.netloc and p.path.startswith('/l/'):
+                  wrapped=parse_qs(p.query).get('uddg',[])
+                  if wrapped: absolute=unquote(wrapped[0]); p=urlsplit(absolute)
+                host=p.netloc.lower().removeprefix('www.')
+                if p.scheme not in ('http','https') or not host or any(host==x or host.endswith('.'+x) for x in blocked): continue
+                if not p.path or p.path=='/': continue
+                found.setdefault(host,absolute)
+              print('PUMA_WEB_ENGINE',engine,'NEW_DOMAINS',len(found)-before)
+          print('PUMA_WEB_SHOPS='+repr(list(found.items())[:20]))
           PY
