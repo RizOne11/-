@@ -1,0 +1,30 @@
+name: PUMA Production Batch
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install -e .
+      - name: Find input workbook
+        id: input
+        shell: bash
+        run: |
+          file=$(find input -maxdepth 1 -type f -name '*.xlsx' | head -1)
+          test -n "$file" || { echo 'Put one .xlsx file into input/ and commit it before running.'; exit 2; }
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+      - name: Run PUMA production scan
+        run: python -m puma_scouts.production "${{ steps.input.outputs.file }}" -o PUMA_result.xlsx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PUMA-result
+          path: PUMA_result.xlsx
+          if-no-files-found: error
