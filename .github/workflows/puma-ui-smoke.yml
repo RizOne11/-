@@ -1,0 +1,36 @@
+name: PUMA UI Smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/puma_scouts/app.py'
+      - 'src/puma_scouts/production.py'
+      - 'pyproject.toml'
+      - '.streamlit/**'
+      - '.github/workflows/puma-ui-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  ui-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install -e . pytest pytest-asyncio
+      - name: Tests
+        run: pytest -q
+      - name: Start PUMA UI
+        run: |
+          streamlit run src/puma_scouts/app.py --server.headless true --server.port 8501 > /tmp/puma-ui.log 2>&1 &
+          echo $! > /tmp/puma-ui.pid
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8501/_stcore/health; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/puma-ui.log
+          exit 1
