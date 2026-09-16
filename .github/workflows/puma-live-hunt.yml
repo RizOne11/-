@@ -22,48 +22,28 @@ jobs:
           python-version: '3.12'
       - name: Install PUMA Scout
         run: pip install -e .
-      - name: Run independent marketplace hunt
+      - name: Run real Rozetka hunt
         env:
           PUMA_PRODUCT: ${{ github.event.inputs.product || 'P27QCB-RA' }}
         run: |
           python - <<'PY'
-          import json, os
+          import asyncio, json, os
           from pathlib import Path
+          from puma_scouts.models import ProductMission
+          from puma_scouts.scouts.rozetka import RozetkaScout
 
           product = os.environ.get('PUMA_PRODUCT', 'P27QCB-RA')
-          print(f'PUMA LIVE HUNT: {product}')
 
-          # Discover Scout modules from the package and exercise their public
-          # discovery/search surfaces without coupling the workflow to a single
-          # implementation name. This deliberately fails loudly if the repo has
-          # no executable live-discovery surface yet.
-          import pkgutil, importlib, inspect
-          import src
+          async def main():
+              mission = ProductMission(article=product, source_data={"model": product})
+              report = await RozetkaScout(timeout=20.0).scan(mission)
+              payload = report.model_dump(mode='json')
+              Path('puma-live-hunt.json').write_text(
+                  json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8'
+              )
+              print(json.dumps(payload, ensure_ascii=False, indent=2))
 
-          wanted = ('rozetka', 'prom', 'epicentr')
-          found = {}
-          errors = {}
-          for modinfo in pkgutil.walk_packages(src.__path__, src.__name__ + '.'):
-              low = modinfo.name.lower()
-              market = next((m for m in wanted if m in low), None)
-              if not market:
-                  continue
-              try:
-                  mod = importlib.import_module(modinfo.name)
-                  candidates = []
-                  for name, obj in inspect.getmembers(mod):
-                      if callable(obj) and any(k in name.lower() for k in ('search','discover','scout','find')):
-                          candidates.append((name, obj))
-                  found.setdefault(market, []).extend((modinfo.name, n) for n, _ in candidates)
-              except Exception as exc:
-                  errors[modinfo.name] = repr(exc)
-
-          report = {'product': product, 'surfaces': found, 'import_errors': errors}
-          Path('puma-live-hunt.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
-          print(json.dumps(report, ensure_ascii=False, indent=2))
-          missing = [m for m in wanted if not found.get(m)]
-          if missing:
-              raise SystemExit('No executable Scout surface discovered for: ' + ', '.join(missing))
+          asyncio.run(main())
           PY
       - name: Upload hunt report
         if: always()
