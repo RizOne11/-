@@ -31,10 +31,14 @@ jobs:
           async def one(scout):
               report = await scout.scan(mission)
               passes = sorted([x for x in report.offers if x.verdict == Verdict.PASS], key=lambda x:x.score, reverse=True)
-              return {'marketplace':scout.marketplace.value,'health':report.health.value,'candidates':report.candidates_collected,'pass_count':len(passes),'best':None if not passes else {'title':passes[0].offer.title,'price':str(passes[0].offer.price) if passes[0].offer.price else None,'url':str(passes[0].offer.url),'score':passes[0].score},'errors':report.errors[:3]}
+              row = {'marketplace':scout.marketplace.value,'health':report.health.value,'candidates':report.candidates_collected,'pass_count':len(passes),'best':None if not passes else {'title':passes[0].offer.title,'price':str(passes[0].offer.price) if passes[0].offer.price else None,'url':str(passes[0].offer.url),'score':passes[0].score},'errors':report.errors[:3]}
+              if scout.marketplace.value == 'epicentr':
+                  ranked = sorted(report.offers, key=lambda x:x.score, reverse=True)[:12]
+                  row['diagnostic'] = [{'title':x.offer.title,'price':str(x.offer.price) if x.offer.price else None,'score':x.score,'verdict':x.verdict.value,'conflicts':x.conflicts,'evidence':x.positive_evidence,'url':str(x.offer.url)} for x in ranked]
+              return row
           async def main():
               rows = await asyncio.gather(*(one(s) for s in scouts))
               print('PUMA_MULTIMARKET_RESULTS=' + json.dumps(rows, ensure_ascii=False))
           asyncio.run(main())
           PY
-# trigger: strong identity fix
+# trigger: epicentr conflict diagnostics
