@@ -115,19 +115,27 @@ class CatalogScout(MarketplaceScout):
             href = html_lib.unescape(tag["href"])
             absolute = urljoin(base_url, href)
             parsed = urlsplit(absolute)
-            # DuckDuckGo HTML wraps destinations in /l/?uddg=<encoded URL>.
             if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
                 wrapped = parse_qs(parsed.query).get("uddg", [])
                 if wrapped: absolute = unquote(wrapped[0])
+            if self._is_candidate(absolute): found.setdefault(_canonical(absolute), None)
+            if len(found) >= self.max_candidates_per_query: break
+        # Some search providers serialize result URLs in JSON/script payloads.
+        decoded = html_lib.unescape(page).replace("\\/", "/")
+        for raw in re.findall(r'https?://[^"\'<>\\\s]+', decoded, flags=re.I):
+            absolute = raw.rstrip(".,);]")
             if self._is_candidate(absolute): found.setdefault(_canonical(absolute), None)
             if len(found) >= self.max_candidates_per_query: break
         return list(found)
 
     async def _external_candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
         site_query = f'site:{self.host} {query}'
+        # Google returns a JS interstitial to hosted runners. These providers have
+        # server-rendered endpoints and require no API key/paid credits.
         urls = (
             f"https://html.duckduckgo.com/html/?q={quote_plus(site_query)}",
-            f"https://www.google.com/search?q={quote_plus(site_query)}&num=20&hl=uk",
+            f"https://www.bing.com/search?q={quote_plus(site_query)}&count=20&setlang=uk",
+            f"https://search.brave.com/search?q={quote_plus(site_query)}&source=web",
         )
         found: dict[str, None] = {}
         for search_url in urls:
