@@ -41,4 +41,4 @@ jobs:
               print('PUMA_MULTIMARKET_RESULTS=' + json.dumps(rows, ensure_ascii=False))
           asyncio.run(main())
           PY
-# trigger: epicentr conflict diagnostics
+# trigger: exact identity bridges parent/sub-brand alias
