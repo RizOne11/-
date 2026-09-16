@@ -15,10 +15,8 @@ from puma_scouts.query import generate_queries
 from puma_scouts.scouts.base import MarketplaceScout
 from puma_scouts.validator import validate_offer
 
-
 _ROZETKA_HOSTS = {"rozetka.com.ua", "www.rozetka.com.ua", "hard.rozetka.com.ua"}
 _PRODUCT_ID_RE = re.compile(r"/p(\d+)(?:/|$)", re.I)
-_PRICE_RE = re.compile(r"(?:₴|грн\.?|UAH)?\s*([0-9][0-9\s\u00a0]{1,12}(?:[.,][0-9]{1,2})?)\s*(?:₴|грн\.?|UAH)?", re.I)
 
 
 def _clean(value: Any) -> str:
@@ -125,15 +123,21 @@ def _offer_from_page(article: str, url: str, html: str, query: str) -> Offer | N
 
 
 def _extract_indexed_rozetka_urls(html: str) -> list[str]:
-    """Extract Rozetka product URLs from search-engine HTML, including DDG redirect links."""
-    text = html_lib.unescape(html)
+    text = html_lib.unescape(html).replace("\\u002F", "/").replace("\\/", "/")
     candidates: list[str] = []
+    # Raw URLs are present in DDG/Bing HTML and often in JSON attributes.
     for raw in re.findall(r'https?://[^\s"\'<>]+', text, flags=re.I):
-        raw = raw.rstrip(').,;')
+        raw = raw.rstrip(').,;]')
         parts = urlsplit(raw)
         if "duckduckgo.com" in parts.netloc and parts.path.startswith("/l/"):
             target = parse_qs(parts.query).get("uddg", [""])[0]
             raw = unquote(target) if target else raw
+        if _is_rozetka_product_url(raw):
+            candidates.append(_canonical_url(raw))
+    # Search engines can HTML-encode or percent-encode destination URLs.
+    decoded = unquote(text)
+    for match in re.findall(r'(?:https?://)?(?:hard\.)?rozetka\.com\.ua/(?:ua/|ru/)?[^\s"\'<>]*?/p\d+/?', decoded, flags=re.I):
+        raw = match if match.startswith("http") else "https://" + match
         if _is_rozetka_product_url(raw):
             candidates.append(_canonical_url(raw))
     unique: dict[str, str] = {}
@@ -161,9 +165,31 @@ class RozetkaScout(MarketplaceScout):
         return response.text
 
     async def _indexed_candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
-        search_url = f"https://html.duckduckgo.com/html/?q={quote_plus('site:rozetka.com.ua ' + query)}"
-        html = await self._get(client, search_url)
-        return _extract_indexed_rozetka_urls(html)[: self.max_candidates_per_query]
+        q = quote_plus('site:rozetka.com.ua "' + query + '"')
+        engines = [
+            f"https://html.duckduckgo.com/html/?q={q}",
+            f"https://www.google.com/search?q={q}&num=20&filter=0",
+            f"https://www.bing.com/search?q={q}&count=20",
+        ]
+        found: dict[str, str] = {}
+        last_error: httpx.HTTPError | None = None
+        for search_url in engines:
+            try:
+                html = await self._get(client, search_url)
+            except httpx.HTTPError as exc:
+                last_error = exc
+                continue
+            for url in _extract_indexed_rozetka_urls(html):
+                pid = _product_id(url)
+                if pid:
+                    found.setdefault(pid, url)
+                if len(found) >= self.max_candidates_per_query:
+                    return list(found.values())
+        if found:
+            return list(found.values())
+        if last_error:
+            raise last_error
+        return []
 
     async def _candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
         search_url = f"https://rozetka.com.ua/ua/search/?text={quote_plus(query)}"
