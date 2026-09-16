@@ -5,11 +5,14 @@ on:
   push:
     paths:
       - '.github/workflows/puma-multimarket-smoke.yml'
+      - 'src/puma_scouts/scouts/catalog.py'
+      - 'src/puma_scouts/validator.py'
+      - 'tests/test_catalog_scouts.py'
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,14 +28,14 @@ jobs:
           import asyncio, json
           from puma_scouts.models import ProductMission, Verdict
           from puma_scouts.scouts.epicentr import EpicentrScout
-          from puma_scouts.scouts.catalog import AlloScout, FoxtrotScout, ComfyScout, KastaScout, HotlineScout
+          from puma_scouts.scouts.catalog import PromScout, AlloScout, FoxtrotScout, ComfyScout, KastaScout, HotlineScout
           mission = ProductMission(article='SMOKE-CONTROL', source_data={'name':'Монитор Xiaomi Redmi A27Q 2025 P27QCB-RA 2560x1440 2K IPS 100 Гц 27 Черный','brand':'Xiaomi','model':'P27QCB-RA'})
-          scouts = [EpicentrScout(timeout=15,max_candidates_per_query=12),AlloScout(timeout=15,max_candidates_per_query=12),FoxtrotScout(timeout=15,max_candidates_per_query=12),ComfyScout(timeout=15,max_candidates_per_query=12),KastaScout(timeout=15,max_candidates_per_query=12),HotlineScout(timeout=15,max_candidates_per_query=12)]
+          scouts = [EpicentrScout(timeout=15,max_candidates_per_query=12),PromScout(timeout=15,max_candidates_per_query=12),AlloScout(timeout=15,max_candidates_per_query=12),FoxtrotScout(timeout=15,max_candidates_per_query=12),ComfyScout(timeout=15,max_candidates_per_query=12),KastaScout(timeout=15,max_candidates_per_query=12),HotlineScout(timeout=15,max_candidates_per_query=12)]
           async def one(scout):
               report = await scout.scan(mission)
               passes = sorted([x for x in report.offers if x.verdict == Verdict.PASS], key=lambda x:x.score, reverse=True)
               row = {'marketplace':scout.marketplace.value,'health':report.health.value,'candidates':report.candidates_collected,'pass_count':len(passes),'best':None if not passes else {'title':passes[0].offer.title,'price':str(passes[0].offer.price) if passes[0].offer.price else None,'url':str(passes[0].offer.url),'score':passes[0].score},'errors':report.errors[:3]}
-              if scout.marketplace.value == 'epicentr':
+              if scout.marketplace.value in ('epicentr','prom'):
                   ranked = sorted(report.offers, key=lambda x:x.score, reverse=True)[:12]
                   row['diagnostic'] = [{'title':x.offer.title,'price':str(x.offer.price) if x.offer.price else None,'score':x.score,'verdict':x.verdict.value,'conflicts':x.conflicts,'evidence':x.positive_evidence,'url':str(x.offer.url)} for x in ranked]
               return row
@@ -41,4 +44,4 @@ jobs:
               print('PUMA_MULTIMARKET_RESULTS=' + json.dumps(rows, ensure_ascii=False))
           asyncio.run(main())
           PY
-# trigger: exact identity bridges parent/sub-brand alias
+# trigger: seven active marketplaces, Rozetka frozen
