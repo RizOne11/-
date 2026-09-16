@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import json
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import quote_plus, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -15,7 +16,7 @@ from puma_scouts.scouts.base import MarketplaceScout
 from puma_scouts.validator import validate_offer
 
 
-_ROZETKA_HOSTS = {"rozetka.com.ua", "www.rozetka.com.ua"}
+_ROZETKA_HOSTS = {"rozetka.com.ua", "www.rozetka.com.ua", "hard.rozetka.com.ua"}
 _PRODUCT_ID_RE = re.compile(r"/p(\d+)(?:/|$)", re.I)
 _PRICE_RE = re.compile(r"(?:₴|грн\.?|UAH)?\s*([0-9][0-9\s\u00a0]{1,12}(?:[.,][0-9]{1,2})?)\s*(?:₴|грн\.?|UAH)?", re.I)
 
@@ -55,11 +56,7 @@ def _decimal_price(value: Any) -> Decimal | None:
 
 def _jsonld_products(html: str) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
-    for raw in re.findall(
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        html,
-        flags=re.I | re.S,
-    ):
+    for raw in re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, flags=re.I | re.S):
         try:
             payload = json.loads(raw.strip())
         except (json.JSONDecodeError, TypeError):
@@ -92,13 +89,11 @@ def _offer_from_page(article: str, url: str, html: str, query: str) -> Offer | N
     product_id = _product_id(url)
     if not product_id:
         return None
-
     title = _meta(html, "og:title") or ""
     image = _meta(html, "og:image")
     price: Decimal | None = None
     availability: str | None = None
     attrs: dict[str, Any] = {}
-
     products = _jsonld_products(html)
     if products:
         product = products[0]
@@ -116,49 +111,46 @@ def _offer_from_page(article: str, url: str, html: str, query: str) -> Offer | N
             seller = offers.get("seller")
             if isinstance(seller, dict):
                 attrs["seller"] = seller.get("name")
-
     if not price:
         price = _decimal_price(_meta(html, "product:price:amount"))
-
     if not title:
         match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.I | re.S)
         title = _clean(re.sub(r"<[^>]+>", " ", match.group(1))) if match else ""
     if not title:
         return None
+    return Offer(article=article, marketplace=Marketplace.ROZETKA, marketplace_product_id=product_id,
+        seller_name=_clean(attrs.pop("seller", "")) or None, title=title, price=price,
+        availability=availability, url=_canonical_url(url), image_urls=[image] if image else [],
+        attributes=attrs, query_used=query, discovery_method="indexed-discovery->rozetka-product-page")
 
-    return Offer(
-        article=article,
-        marketplace=Marketplace.ROZETKA,
-        marketplace_product_id=product_id,
-        seller_name=_clean(attrs.pop("seller", "")) or None,
-        title=title,
-        price=price,
-        availability=availability,
-        url=_canonical_url(url),
-        image_urls=[image] if image else [],
-        attributes=attrs,
-        query_used=query,
-        discovery_method="rozetka-search-page->product-page",
-    )
+
+def _extract_indexed_rozetka_urls(html: str) -> list[str]:
+    """Extract Rozetka product URLs from search-engine HTML, including DDG redirect links."""
+    text = html_lib.unescape(html)
+    candidates: list[str] = []
+    for raw in re.findall(r'https?://[^\s"\'<>]+', text, flags=re.I):
+        raw = raw.rstrip(').,;')
+        parts = urlsplit(raw)
+        if "duckduckgo.com" in parts.netloc and parts.path.startswith("/l/"):
+            target = parse_qs(parts.query).get("uddg", [""])[0]
+            raw = unquote(target) if target else raw
+        if _is_rozetka_product_url(raw):
+            candidates.append(_canonical_url(raw))
+    unique: dict[str, str] = {}
+    for url in candidates:
+        pid = _product_id(url)
+        if pid:
+            unique.setdefault(pid, url)
+    return list(unique.values())
 
 
 class RozetkaScout(MarketplaceScout):
-    """Independent recall-first Rozetka scout.
-
-    Discovery intentionally keeps identity validation separate. Search pages only
-    provide candidate product URLs; product pages provide evidence. Different
-    locale/tracking URLs are deduplicated by Rozetka product id, not by title.
-    """
-
     marketplace = Marketplace.ROZETKA
 
     def __init__(self, *, timeout: float = 15.0, max_candidates_per_query: int = 30) -> None:
         self.timeout = timeout
         self.max_candidates_per_query = max_candidates_per_query
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
-            "Accept-Language": "uk-UA,uk;q=0.9,ru;q=0.7,en;q=0.5",
-        }
+        self.headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36", "Accept-Language": "uk-UA,uk;q=0.9,ru;q=0.7,en;q=0.5"}
 
     async def generate_queries(self, mission: ProductMission) -> list[str]:
         return generate_queries(mission)
@@ -168,23 +160,34 @@ class RozetkaScout(MarketplaceScout):
         response.raise_for_status()
         return response.text
 
+    async def _indexed_candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
+        search_url = f"https://html.duckduckgo.com/html/?q={quote_plus('site:rozetka.com.ua ' + query)}"
+        html = await self._get(client, search_url)
+        return _extract_indexed_rozetka_urls(html)[: self.max_candidates_per_query]
+
     async def _candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
         search_url = f"https://rozetka.com.ua/ua/search/?text={quote_plus(query)}"
-        html = await self._get(client, search_url)
-        urls: list[str] = []
-        seen: set[str] = set()
-        for href in re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.I):
-            absolute = urljoin(search_url, href.replace("&amp;", "&"))
-            if not _is_rozetka_product_url(absolute):
-                continue
-            pid = _product_id(absolute)
-            if not pid or pid in seen:
-                continue
-            seen.add(pid)
-            urls.append(_canonical_url(absolute))
-            if len(urls) >= self.max_candidates_per_query:
-                break
-        return urls
+        try:
+            html = await self._get(client, search_url)
+            urls: list[str] = []
+            seen: set[str] = set()
+            for href in re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.I):
+                absolute = urljoin(search_url, href.replace("&amp;", "&"))
+                if not _is_rozetka_product_url(absolute):
+                    continue
+                pid = _product_id(absolute)
+                if not pid or pid in seen:
+                    continue
+                seen.add(pid)
+                urls.append(_canonical_url(absolute))
+                if len(urls) >= self.max_candidates_per_query:
+                    break
+            if urls:
+                return urls
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in (403, 429):
+                raise
+        return await self._indexed_candidate_urls(client, query)
 
     async def discover(self, mission: ProductMission, query: str) -> list[Offer]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -205,15 +208,13 @@ class RozetkaScout(MarketplaceScout):
         errors: list[str] = []
         collected: list[Offer] = []
         pages_scanned = 0
-
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for query in queries:
                 try:
                     candidates = await self._candidate_urls(client, query)
                 except httpx.HTTPError as exc:
-                    errors.append(f"search {query!r}: {type(exc).__name__}: {exc}")
+                    errors.append(f"discovery {query!r}: {type(exc).__name__}: {exc}")
                     continue
-
                 for url in candidates:
                     pages_scanned += 1
                     try:
@@ -224,12 +225,10 @@ class RozetkaScout(MarketplaceScout):
                     except httpx.HTTPError as exc:
                         errors.append(f"page {url}: {type(exc).__name__}: {exc}")
                     await asyncio.sleep(0)
-
         unique: dict[str, Offer] = {}
         for offer in collected:
             key = offer.marketplace_product_id or str(offer.url)
             unique.setdefault(key, offer)
-
         validated = [validate_offer(mission, offer) for offer in unique.values()]
         if validated:
             health = ScanHealth.PARTIAL if errors else ScanHealth.FOUND
@@ -237,17 +236,7 @@ class RozetkaScout(MarketplaceScout):
             health = ScanHealth.ACCESS_LIMITED
         else:
             health = ScanHealth.NOT_FOUND
-
-        return ScanReport(
-            article=mission.article,
-            marketplace=self.marketplace,
-            health=health,
-            queries_generated=len(queries),
-            pages_scanned=pages_scanned,
-            candidates_seen=len(collected),
-            candidates_collected=len(unique),
-            duplicates_removed=max(0, len(collected) - len(unique)),
-            search_rounds=1,
-            errors=errors,
-            offers=validated,
-        )
+        return ScanReport(article=mission.article, marketplace=self.marketplace, health=health,
+            queries_generated=len(queries), pages_scanned=pages_scanned, candidates_seen=len(collected),
+            candidates_collected=len(unique), duplicates_removed=max(0, len(collected) - len(unique)),
+            search_rounds=1, errors=errors, offers=validated)
