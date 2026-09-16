@@ -1,0 +1,7 @@
+name: PUMA Trigger
+on: [push]
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo P27QCB-RA
