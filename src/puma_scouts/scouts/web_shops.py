@@ -38,7 +38,6 @@ class WebShopsScout(MarketplaceScout):
             q=q.strip()
             if not q or q.casefold()==article or (article and article in q.casefold()): continue
             if q not in out: out.append(q)
-        # Bias search toward Ukrainian commerce without depending on source article.
         return [f'{q} купити грн' for q in out[:5]]
 
     def _blocked(self, host: str) -> bool:
@@ -57,7 +56,6 @@ class WebShopsScout(MarketplaceScout):
         for a in BeautifulSoup(page,"html.parser").find_all("a",href=True):
             url=self._unwrap(a["href"],base); p=urlsplit(url); host=p.netloc.casefold().removeprefix("www.")
             if p.scheme not in ("http","https") or not host or self._blocked(host) or not p.path or p.path=="/": continue
-            # Ukrainian shops are normally .ua, .com.ua or pages with Ukrainian commerce signals.
             text=(a.get_text(" ",strip=True)+" "+url).casefold()
             uaish=host.endswith(".ua") or any(x in text for x in ("купити","ціна","грн","uah","україн"))
             if not uaish or per_domain[host]>=self.max_per_domain: continue
@@ -103,6 +101,19 @@ class WebShopsScout(MarketplaceScout):
         if isinstance(brand,dict): attrs["brand"]=brand.get("name")
         elif brand: attrs["brand"]=brand
         return Offer(article=mission.article,marketplace=self.marketplace,marketplace_product_id=_clean(product.get("sku")) or None,title=title,price=amount,availability=availability,url=_canonical(url),attributes=attrs,query_used=query,discovery_method="free-web-search->shop-jsonld")
+
+    async def discover(self, mission: ProductMission, query: str) -> list[Offer]:
+        """Discover and parse independent-shop offers for one generated query."""
+        offers=[]
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for url in await self._candidate_urls(client, query):
+                try:
+                    offer=self._offer(mission, url, await self._get(client, url), query)
+                except httpx.HTTPError:
+                    continue
+                if offer:
+                    offers.append(offer)
+        return offers
 
     async def scan(self, mission: ProductMission) -> ScanReport:
         queries=await self.generate_queries(mission); unique={}; errors=[]; seen=0
