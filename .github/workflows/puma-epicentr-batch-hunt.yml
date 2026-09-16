@@ -7,7 +7,7 @@ on:
     paths:
       - '.github/workflows/puma-epicentr-batch-hunt.yml'
 
-# trigger: 2026-09-16 real batch run
+# trigger: 2026-09-16 hardened validator rerun
 jobs:
   batch-hunt:
     runs-on: ubuntu-latest
@@ -52,17 +52,7 @@ jobs:
               report = await scout.scan(mission)
               passes = [x for x in report.offers if x.verdict.value == "PASS"]
               best = max(passes, key=lambda x: x.score, default=None)
-              result = {
-                  "index": index,
-                  "input": product,
-                  "health": report.health.value,
-                  "queries": queries,
-                  "pages_scanned": report.pages_scanned,
-                  "candidates_seen": report.candidates_seen,
-                  "pass_count": len(passes),
-                  "best": best.model_dump(mode="json") if best else None,
-                  "errors": report.errors,
-              }
+              result = {"index": index, "input": product, "health": report.health.value, "queries": queries, "pages_scanned": report.pages_scanned, "candidates_seen": report.candidates_seen, "pass_count": len(passes), "best": best.model_dump(mode="json") if best else None, "errors": report.errors}
               print("PUMA BATCH ITEM:", json.dumps(result, ensure_ascii=False))
               return result
 
@@ -70,12 +60,7 @@ jobs:
               results = []
               for i, product in enumerate(PRODUCTS, 1):
                   results.append(await scan_one(i, product))
-              summary = {
-                  "total": len(results),
-                  "found": sum(1 for r in results if r["best"]),
-                  "not_found": sum(1 for r in results if not r["best"]),
-                  "items": results,
-              }
+              summary = {"total": len(results), "found": sum(1 for r in results if r["best"]), "not_found": sum(1 for r in results if not r["best"]), "items": results}
               Path("puma-epicentr-batch.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
               print("PUMA BATCH SUMMARY:", json.dumps({"total": summary["total"], "found": summary["found"], "not_found": summary["not_found"]}, ensure_ascii=False))
 
