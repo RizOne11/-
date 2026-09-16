@@ -48,9 +48,11 @@ def _decimal_price(value: Any) -> Decimal | None:
 
 def _jsonld_products(html: str) -> list[dict[str, Any]]:
     products: list[dict[str, Any]] = []
-    for raw in re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, flags=re.I | re.S):
+    pattern = r'<script\b[^>]*\btype\s*=\s*["\']application/ld\+json["\'][^>]*>(.*?)</script\s*>'
+    for raw in re.findall(pattern, html, flags=re.I | re.S):
+        raw = html_lib.unescape(raw).strip()
         try:
-            payload = json.loads(raw.strip())
+            payload = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             continue
         queue = payload if isinstance(payload, list) else [payload]
@@ -122,20 +124,10 @@ def _offer_from_page(article: str, url: str, html: str, query: str) -> Offer | N
     if code:
         product_id = code.group(1)
 
-    return Offer(
-        article=article,
-        marketplace=Marketplace.EPICENTR,
-        marketplace_product_id=product_id,
-        seller_name=seller_name,
-        title=title,
-        price=price,
-        availability=availability,
-        url=_canonical_url(url),
-        image_urls=[],
-        attributes=attrs,
-        query_used=query,
-        discovery_method="epicentr-search->product-page",
-    )
+    return Offer(article=article, marketplace=Marketplace.EPICENTR, marketplace_product_id=product_id,
+        seller_name=seller_name, title=title, price=price, availability=availability,
+        url=_canonical_url(url), image_urls=[], attributes=attrs, query_used=query,
+        discovery_method="epicentr-search->product-page")
 
 
 class EpicentrScout(MarketplaceScout):
@@ -144,13 +136,9 @@ class EpicentrScout(MarketplaceScout):
     def __init__(self, *, timeout: float = 15.0, max_candidates_per_query: int = 30) -> None:
         self.timeout = timeout
         self.max_candidates_per_query = max_candidates_per_query
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
-            "Accept-Language": "uk-UA,uk;q=0.9,ru;q=0.7,en;q=0.5",
-        }
+        self.headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36", "Accept-Language": "uk-UA,uk;q=0.9,ru;q=0.7,en;q=0.5"}
 
     async def generate_queries(self, mission: ProductMission) -> list[str]:
-        # Deliberately do not make the supplier article the primary discovery key.
         queries = generate_queries(mission)
         article = mission.article.casefold().strip()
         non_article = [q for q in queries if q.casefold().strip() != article]
@@ -162,10 +150,7 @@ class EpicentrScout(MarketplaceScout):
         return response.text
 
     async def _candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
-        search_urls = [
-            f"https://epicentrk.ua/ua/search/?q={quote_plus(query)}",
-            f"https://epicentrk.ua/ua/search/?search={quote_plus(query)}",
-        ]
+        search_urls = [f"https://epicentrk.ua/ua/search/?q={quote_plus(query)}", f"https://epicentrk.ua/ua/search/?search={quote_plus(query)}"]
         found: dict[str, str] = {}
         last_error: httpx.HTTPError | None = None
         for search_url in search_urls:
@@ -185,7 +170,7 @@ class EpicentrScout(MarketplaceScout):
             if found:
                 break
         if found:
-            return list(found.values())[: self.max_candidates_per_query]
+            return list(found.values())[:self.max_candidates_per_query]
         if last_error:
             raise last_error
         return []
@@ -217,9 +202,7 @@ class EpicentrScout(MarketplaceScout):
                 continue
             seen += len(offers)
             for offer in offers:
-                key = str(offer.url)
-                unique.setdefault(key, offer)
-
+                unique.setdefault(str(offer.url), offer)
         validated = [validate_offer(mission, offer) for offer in unique.values()]
         passes = [item for item in validated if item.verdict == Verdict.PASS]
         conflicts = [item for item in validated if item.verdict == Verdict.CONFLICT]
@@ -231,17 +214,7 @@ class EpicentrScout(MarketplaceScout):
             health = ScanHealth.ACCESS_LIMITED
         else:
             health = ScanHealth.NOT_FOUND
-
-        return ScanReport(
-            article=mission.article,
-            marketplace=self.marketplace,
-            health=health,
-            queries_generated=len(queries),
-            pages_scanned=len(unique),
-            candidates_seen=seen,
-            candidates_collected=len(unique),
-            duplicates_removed=max(0, seen - len(unique)),
-            search_rounds=len(queries),
-            errors=errors,
-            offers=validated,
-        )
+        return ScanReport(article=mission.article, marketplace=self.marketplace, health=health,
+            queries_generated=len(queries), pages_scanned=len(unique), candidates_seen=seen,
+            candidates_collected=len(unique), duplicates_removed=max(0, seen-len(unique)),
+            search_rounds=len(queries), errors=errors, offers=validated)
