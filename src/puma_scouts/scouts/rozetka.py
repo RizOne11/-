@@ -23,6 +23,10 @@ def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _norm(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _clean(value).casefold())
+
+
 def _canonical_url(url: str) -> str:
     parts = urlsplit(url)
     host = parts.netloc.lower()
@@ -88,7 +92,6 @@ def _offer_from_page(article: str, url: str, html: str, query: str) -> Offer | N
     if not product_id:
         return None
     title = _meta(html, "og:title") or ""
-    image = _meta(html, "og:image")
     price: Decimal | None = None
     availability: str | None = None
     attrs: dict[str, Any] = {}
@@ -118,8 +121,8 @@ def _offer_from_page(article: str, url: str, html: str, query: str) -> Offer | N
         return None
     return Offer(article=article, marketplace=Marketplace.ROZETKA, marketplace_product_id=product_id,
         seller_name=_clean(attrs.pop("seller", "")) or None, title=title, price=price,
-        availability=availability, url=_canonical_url(url), image_urls=[image] if image else [],
-        attributes=attrs, query_used=query, discovery_method="indexed-discovery->rozetka-product-page")
+        availability=availability, url=_canonical_url(url), image_urls=[], attributes=attrs,
+        query_used=query, discovery_method="indexed-discovery->rozetka-product-page")
 
 
 def _offer_from_api(article: str, product_id: str, payload: dict[str, Any], query: str, fallback_url: str) -> Offer | None:
@@ -146,21 +149,11 @@ def _offer_from_api(article: str, product_id: str, payload: dict[str, Any], quer
     for key in ("sku", "mpn", "model"):
         if data.get(key):
             attrs[key] = data[key]
-    images = data.get("images") or []
-    image_urls: list[str] = []
-    if isinstance(images, list):
-        for image in images[:5]:
-            if isinstance(image, dict):
-                candidate = image.get("original") or image.get("big") or image.get("preview")
-                if candidate:
-                    image_urls.append(str(candidate))
-            elif isinstance(image, str):
-                image_urls.append(image)
     availability = _clean(data.get("sell_status") or data.get("availability")) or None
     return Offer(article=article, marketplace=Marketplace.ROZETKA, marketplace_product_id=product_id,
         seller_name=seller_name, title=title, price=price, availability=availability,
         url=_canonical_url(str(url)) if _is_rozetka_product_url(str(url)) else _canonical_url(fallback_url),
-        image_urls=image_urls, attributes=attrs, query_used=query,
+        image_urls=[], attributes=attrs, query_used=query,
         discovery_method="indexed-discovery->rozetka-product-api")
 
 
@@ -186,6 +179,16 @@ def _extract_indexed_rozetka_urls(html: str) -> list[str]:
         if pid:
             unique.setdefault(pid, url)
     return list(unique.values())
+
+
+def _rank_candidate_urls(urls: list[str], query: str) -> list[str]:
+    needle = _norm(query)
+    def rank(url: str) -> tuple[int, int]:
+        slug = urlsplit(url).path.rsplit("/p", 1)[0]
+        normalized_slug = _norm(slug)
+        exact = 0 if needle and needle in normalized_slug else 1
+        return (exact, len(normalized_slug))
+    return sorted(urls, key=rank)
 
 
 class RozetkaScout(MarketplaceScout):
@@ -214,24 +217,33 @@ class RozetkaScout(MarketplaceScout):
         return _offer_from_api(article, pid, response.json(), query, url)
 
     async def _indexed_candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
-        q = quote_plus('site:rozetka.com.ua "' + query + '"')
-        engines = [f"https://html.duckduckgo.com/html/?q={q}", f"https://www.google.com/search?q={q}&num=20&filter=0", f"https://www.bing.com/search?q={q}&count=20"]
+        searches = [
+            f'site:rozetka.com.ua "{query}"',
+            f'site:hard.rozetka.com.ua "{query}"',
+            f'site:rozetka.com.ua {query}',
+        ]
         found: dict[str, str] = {}
         last_error: httpx.HTTPError | None = None
-        for search_url in engines:
-            try:
-                html = await self._get(client, search_url)
-            except httpx.HTTPError as exc:
-                last_error = exc
-                continue
-            for url in _extract_indexed_rozetka_urls(html):
-                pid = _product_id(url)
-                if pid:
-                    found.setdefault(pid, url)
+        for search in searches:
+            q = quote_plus(search)
+            engines = [f"https://html.duckduckgo.com/html/?q={q}", f"https://www.google.com/search?q={q}&num=20&filter=0", f"https://www.bing.com/search?q={q}&count=20"]
+            for search_url in engines:
+                try:
+                    html = await self._get(client, search_url)
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                    continue
+                for url in _rank_candidate_urls(_extract_indexed_rozetka_urls(html), query):
+                    pid = _product_id(url)
+                    if pid:
+                        found.setdefault(pid, url)
+                exact = [url for url in found.values() if _norm(query) in _norm(urlsplit(url).path)]
+                if exact:
+                    return _rank_candidate_urls(exact, query)[:self.max_candidates_per_query]
                 if len(found) >= self.max_candidates_per_query:
-                    return list(found.values())
+                    return _rank_candidate_urls(list(found.values()), query)[:self.max_candidates_per_query]
         if found:
-            return list(found.values())
+            return _rank_candidate_urls(list(found.values()), query)[:self.max_candidates_per_query]
         if last_error:
             raise last_error
         return []
@@ -251,10 +263,8 @@ class RozetkaScout(MarketplaceScout):
                     continue
                 seen.add(pid)
                 urls.append(_canonical_url(absolute))
-                if len(urls) >= self.max_candidates_per_query:
-                    break
             if urls:
-                return urls
+                return _rank_candidate_urls(urls, query)[:self.max_candidates_per_query]
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in (403, 429):
                 raise
