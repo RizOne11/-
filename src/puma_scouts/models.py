@@ -17,6 +17,8 @@ class Marketplace(StrEnum):
     COMFY = "comfy"
     KASTA = "kasta"
     HOTLINE = "hotline"
+    ZAKUPKA = "zakupka"
+    WEB_SHOPS = "web_shops"
 
 
 class Verdict(StrEnum):
