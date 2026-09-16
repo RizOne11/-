@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from puma_scouts.models import Offer, ProductMission, ValidatedOffer, Verdict
+from puma_scouts.models import Marketplace, Offer, ProductMission, ValidatedOffer, Verdict
 from puma_scouts.query import extract_identifiers
 
 
@@ -93,9 +93,6 @@ def validate_offer(mission: ProductMission, offer: Offer) -> ValidatedOffer:
     identifiers=extract_identifiers(mission); matched_ids=[i for i in identifiers if _strong_identifier(i) and _compact(i) and _compact(i) in _compact(offer_text)]
     expected_model=_explicit_model(mission); model_match=_model_match(expected_model,offer_text); expected_brand=_explicit_brand(mission); brand_match=_brand_match(expected_brand,offer_text)
     strong_identity=bool(matched_ids or model_match)
-    # Marketplace titles often expose a sub-brand (e.g. Redmi) while the source uses
-    # the parent brand (Xiaomi). An exact model/MPN/GTIN is stronger identity evidence
-    # than a missing parent-brand token. Brand mismatch remains blocking for fuzzy-only matches.
     brand_problem = None if (brand_match or strong_identity) else f"brand not confirmed: {expected_brand}"
     problems=[_type_conflict(source_text,offer_text),_quantity_conflict(source_text,offer_text,strong_identity=strong_identity),_measurement_conflict(source_text,offer_text),brand_problem]
     conflicts=[p for p in problems if p]; positive=[]
@@ -105,8 +102,18 @@ def validate_offer(mission: ProductMission, offer: Offer) -> ValidatedOffer:
     if expected_brand and not brand_match and strong_identity: positive.append("brand token absent but exact identity confirmed")
     if overlap>=.35: positive.append(f"source token overlap={overlap:.2f}")
     if conflicts: score=min(.64,.20+overlap); verdict=Verdict.CONFLICT if overlap>=.18 else Verdict.REJECT
-    elif expected_model and not model_match:
+    elif expected_model and not model_match and offer.marketplace != Marketplace.PROM:
         if overlap>=.18: score=min(.64,.20+overlap); verdict=Verdict.CONFLICT; conflicts.append(f"expected model not confirmed: {expected_model}")
+        else: score=overlap; verdict=Verdict.REJECT
+    elif expected_model and not model_match and offer.marketplace == Marketplace.PROM:
+        # Prom seller cards are frequently incomplete. Missing MPN/model is not a
+        # contradiction: accept a strong descriptive match when no explicit type,
+        # quantity, numeric-spec or brand conflict was observed.
+        if overlap>=.55:
+            score=min(.88,.42+overlap); verdict=Verdict.PASS
+            positive.append("Prom descriptive identity accepted; model absent")
+        elif overlap>=.18:
+            score=min(.64,.20+overlap); verdict=Verdict.CONFLICT; conflicts.append("insufficient Prom descriptive identity")
         else: score=overlap; verdict=Verdict.REJECT
     elif strong_identity: score=min(1.0,.72+.05*len(matched_ids)+(.05 if model_match else 0)+.18*overlap); verdict=Verdict.PASS
     elif overlap>=.55: score=min(.79,.35+overlap); verdict=Verdict.PASS
