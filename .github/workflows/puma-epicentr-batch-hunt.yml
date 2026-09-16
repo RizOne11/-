@@ -7,7 +7,7 @@ on:
     paths:
       - '.github/workflows/puma-epicentr-batch-hunt.yml'
 
-# trigger: 2026-09-16 model suffix X fix
+# trigger: 2026-09-16 brand + numeric identity checks
 jobs:
   batch-hunt:
     runs-on: ubuntu-latest
