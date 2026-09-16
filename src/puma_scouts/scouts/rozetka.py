@@ -122,10 +122,51 @@ def _offer_from_page(article: str, url: str, html: str, query: str) -> Offer | N
         attributes=attrs, query_used=query, discovery_method="indexed-discovery->rozetka-product-page")
 
 
+def _offer_from_api(article: str, product_id: str, payload: dict[str, Any], query: str, fallback_url: str) -> Offer | None:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return None
+    title = _clean(data.get("title") or data.get("name"))
+    if not title:
+        return None
+    url = data.get("href") or data.get("url") or fallback_url
+    price = _decimal_price(data.get("price") or data.get("price_pcs"))
+    seller = data.get("seller")
+    seller_name = None
+    if isinstance(seller, dict):
+        seller_name = _clean(seller.get("title") or seller.get("name")) or None
+    elif data.get("seller_title"):
+        seller_name = _clean(data.get("seller_title"))
+    brand = data.get("brand")
+    attrs: dict[str, Any] = {"source": "rozetka-product-api"}
+    if isinstance(brand, dict):
+        attrs["brand"] = brand.get("title") or brand.get("name")
+    elif brand:
+        attrs["brand"] = brand
+    for key in ("sku", "mpn", "model"):
+        if data.get(key):
+            attrs[key] = data[key]
+    images = data.get("images") or []
+    image_urls: list[str] = []
+    if isinstance(images, list):
+        for image in images[:5]:
+            if isinstance(image, dict):
+                candidate = image.get("original") or image.get("big") or image.get("preview")
+                if candidate:
+                    image_urls.append(str(candidate))
+            elif isinstance(image, str):
+                image_urls.append(image)
+    availability = _clean(data.get("sell_status") or data.get("availability")) or None
+    return Offer(article=article, marketplace=Marketplace.ROZETKA, marketplace_product_id=product_id,
+        seller_name=seller_name, title=title, price=price, availability=availability,
+        url=_canonical_url(str(url)) if _is_rozetka_product_url(str(url)) else _canonical_url(fallback_url),
+        image_urls=image_urls, attributes=attrs, query_used=query,
+        discovery_method="indexed-discovery->rozetka-product-api")
+
+
 def _extract_indexed_rozetka_urls(html: str) -> list[str]:
     text = html_lib.unescape(html).replace("\\u002F", "/").replace("\\/", "/")
     candidates: list[str] = []
-    # Raw URLs are present in DDG/Bing HTML and often in JSON attributes.
     for raw in re.findall(r'https?://[^\s"\'<>]+', text, flags=re.I):
         raw = raw.rstrip(').,;]')
         parts = urlsplit(raw)
@@ -134,7 +175,6 @@ def _extract_indexed_rozetka_urls(html: str) -> list[str]:
             raw = unquote(target) if target else raw
         if _is_rozetka_product_url(raw):
             candidates.append(_canonical_url(raw))
-    # Search engines can HTML-encode or percent-encode destination URLs.
     decoded = unquote(text)
     for match in re.findall(r'(?:https?://)?(?:hard\.)?rozetka\.com\.ua/(?:ua/|ru/)?[^\s"\'<>]*?/p\d+/?', decoded, flags=re.I):
         raw = match if match.startswith("http") else "https://" + match
@@ -164,13 +204,18 @@ class RozetkaScout(MarketplaceScout):
         response.raise_for_status()
         return response.text
 
+    async def _api_offer(self, client: httpx.AsyncClient, article: str, url: str, query: str) -> Offer | None:
+        pid = _product_id(url)
+        if not pid:
+            return None
+        api_url = f"https://product-api.rozetka.com.ua/v4/goods/get-main?front-type=xl&country=UA&lang=ua&goodsId={pid}"
+        response = await client.get(api_url, headers=self.headers, follow_redirects=True)
+        response.raise_for_status()
+        return _offer_from_api(article, pid, response.json(), query, url)
+
     async def _indexed_candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
         q = quote_plus('site:rozetka.com.ua "' + query + '"')
-        engines = [
-            f"https://html.duckduckgo.com/html/?q={q}",
-            f"https://www.google.com/search?q={q}&num=20&filter=0",
-            f"https://www.bing.com/search?q={q}&count=20",
-        ]
+        engines = [f"https://html.duckduckgo.com/html/?q={q}", f"https://www.google.com/search?q={q}&num=20&filter=0", f"https://www.bing.com/search?q={q}&count=20"]
         found: dict[str, str] = {}
         last_error: httpx.HTTPError | None = None
         for search_url in engines:
@@ -215,17 +260,26 @@ class RozetkaScout(MarketplaceScout):
                 raise
         return await self._indexed_candidate_urls(client, query)
 
+    async def _fetch_offer(self, client: httpx.AsyncClient, mission: ProductMission, url: str, query: str) -> Offer | None:
+        try:
+            html = await self._get(client, url)
+            offer = _offer_from_page(mission.article, url, html, query)
+            if offer:
+                return offer
+        except httpx.HTTPError:
+            pass
+        return await self._api_offer(client, mission.article, url, query)
+
     async def discover(self, mission: ProductMission, query: str) -> list[Offer]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             candidates = await self._candidate_urls(client, query)
             offers: list[Offer] = []
             for url in candidates:
                 try:
-                    html = await self._get(client, url)
-                    offer = _offer_from_page(mission.article, url, html, query)
+                    offer = await self._fetch_offer(client, mission, url, query)
                     if offer:
                         offers.append(offer)
-                except (httpx.HTTPError, ValueError):
+                except (httpx.HTTPError, ValueError, json.JSONDecodeError):
                     continue
             return offers
 
@@ -244,12 +298,11 @@ class RozetkaScout(MarketplaceScout):
                 for url in candidates:
                     pages_scanned += 1
                     try:
-                        html = await self._get(client, url)
-                        offer = _offer_from_page(mission.article, url, html, query)
+                        offer = await self._fetch_offer(client, mission, url, query)
                         if offer:
                             collected.append(offer)
-                    except httpx.HTTPError as exc:
-                        errors.append(f"page {url}: {type(exc).__name__}: {exc}")
+                    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
+                        errors.append(f"page/api {url}: {type(exc).__name__}: {exc}")
                     await asyncio.sleep(0)
         unique: dict[str, Offer] = {}
         for offer in collected:
