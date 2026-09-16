@@ -12,6 +12,11 @@ class Marketplace(StrEnum):
     PROM = "prom"
     ROZETKA = "rozetka"
     EPICENTR = "epicentr"
+    ALLO = "allo"
+    FOXTROT = "foxtrot"
+    COMFY = "comfy"
+    KASTA = "kasta"
+    HOTLINE = "hotline"
 
 
 class Verdict(StrEnum):
