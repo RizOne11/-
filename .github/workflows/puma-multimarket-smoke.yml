@@ -23,6 +23,42 @@ jobs:
         run: pip install -e . pytest pytest-asyncio
       - name: Tests
         run: pytest -q
+      - name: Diagnose zero-source discovery
+        run: |
+          python - <<'PY'
+          import asyncio, re
+          from urllib.parse import quote_plus
+          import httpx
+
+          stores = {
+              'allo': 'allo.ua',
+              'foxtrot': 'foxtrot.com.ua',
+              'comfy': 'comfy.ua',
+              'kasta': 'kasta.ua',
+          }
+          query = 'Xiaomi Redmi A27Q 2025 P27QCB-RA'
+
+          async def probe(name, domain):
+              url = 'https://www.google.com/search?q=' + quote_plus(f'site:{domain} {query}')
+              headers = {'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36','Accept-Language':'uk-UA,uk;q=0.9,en;q=0.8'}
+              try:
+                  async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=headers) as client:
+                      r = await client.get(url)
+                  text = r.text
+                  urls = []
+                  for raw in re.findall(r'https?://[^\s\"<>]+', text):
+                      clean = raw.replace('&amp;', '&').split('&ved=')[0]
+                      if domain in clean and clean not in urls:
+                          urls.append(clean[:300])
+                  print(f'PUMA_DISCOVERY_DIAG store={name} status={r.status_code} bytes={len(text)} final={r.url} domain_mentions={text.lower().count(domain)} urls={urls[:8]}')
+                  print(f'PUMA_DISCOVERY_SNIP store={name} text={re.sub(r"\\s+", " ", text[:500])}')
+              except Exception as exc:
+                  print(f'PUMA_DISCOVERY_DIAG store={name} ERROR={type(exc).__name__}:{exc}')
+
+          async def main():
+              await asyncio.gather(*(probe(n,d) for n,d in stores.items()))
+          asyncio.run(main())
+          PY
       - name: Live marketplace smoke
         run: |
           python - <<'PY'
@@ -43,4 +79,4 @@ jobs:
               print('PUMA_MULTIMARKET_RESULTS=' + json.dumps(rows, ensure_ascii=False))
           asyncio.run(main())
           PY
-# primary-ci-v3: force run after workflow cleanup
+# primary-ci-v4: zero-source discovery diagnostics
