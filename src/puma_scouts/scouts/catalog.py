@@ -5,7 +5,7 @@ import json
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import quote_plus, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -59,6 +59,7 @@ class CatalogScout(MarketplaceScout):
     search_templates: tuple[str, ...]
     product_path_hints: tuple[str, ...] = ()
     allow_subdomains = False
+    external_fallback = False
 
     def __init__(self, *, timeout: float = 15.0, max_candidates_per_query: int = 20) -> None:
         self.timeout = timeout
@@ -97,12 +98,8 @@ class CatalogScout(MarketplaceScout):
         for tag in soup.find_all("a", href=True):
             absolute = urljoin(base_url, tag["href"])
             if self._is_candidate(absolute): found.setdefault(_canonical(absolute), None)
-        # JS-heavy shops often serialize product URLs in hydration JSON rather than anchors.
         decoded = html_lib.unescape(page).replace("\\/", "/")
-        patterns = [
-            r'https?://[^"\'<>\\\s]+',
-            r'(?P<path>/(?:ua|uk|ru)?/?[^"\'<>\\\s]{4,}\.html(?:\?[^"\'<>\\\s]*)?)',
-        ]
+        patterns = [r'https?://[^"\'<>\\\s]+', r'(?P<path>/(?:ua|uk|ru)?/?[^"\'<>\\\s]{4,}\.html(?:\?[^"\'<>\\\s]*)?)']
         for pattern in patterns:
             for match in re.finditer(pattern, decoded, flags=re.I):
                 raw = match.groupdict().get("path") or match.group(0)
@@ -110,6 +107,36 @@ class CatalogScout(MarketplaceScout):
                 if self._is_candidate(absolute): found.setdefault(_canonical(absolute), None)
                 if len(found) >= self.max_candidates_per_query: break
         return list(found)[: self.max_candidates_per_query]
+
+    def _extract_external_links(self, page: str, base_url: str) -> list[str]:
+        found: dict[str, None] = {}
+        soup = BeautifulSoup(page, "html.parser")
+        for tag in soup.find_all("a", href=True):
+            href = html_lib.unescape(tag["href"])
+            absolute = urljoin(base_url, href)
+            parsed = urlsplit(absolute)
+            # DuckDuckGo HTML wraps destinations in /l/?uddg=<encoded URL>.
+            if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+                wrapped = parse_qs(parsed.query).get("uddg", [])
+                if wrapped: absolute = unquote(wrapped[0])
+            if self._is_candidate(absolute): found.setdefault(_canonical(absolute), None)
+            if len(found) >= self.max_candidates_per_query: break
+        return list(found)
+
+    async def _external_candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
+        site_query = f'site:{self.host} {query}'
+        urls = (
+            f"https://html.duckduckgo.com/html/?q={quote_plus(site_query)}",
+            f"https://www.google.com/search?q={quote_plus(site_query)}&num=20&hl=uk",
+        )
+        found: dict[str, None] = {}
+        for search_url in urls:
+            try: page = await self._get(client, search_url)
+            except httpx.HTTPError: continue
+            for url in self._extract_external_links(page, search_url):
+                found.setdefault(url, None)
+                if len(found) >= self.max_candidates_per_query: return list(found)
+        return list(found)
 
     async def _candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
         found: dict[str, None] = {}
@@ -120,7 +147,9 @@ class CatalogScout(MarketplaceScout):
             for url in self._extract_candidate_links(page, search_url):
                 found.setdefault(url, None)
                 if len(found) >= self.max_candidates_per_query: return list(found)
-        return list(found)
+        if not found and self.external_fallback:
+            for url in await self._external_candidate_urls(client, query): found.setdefault(url, None)
+        return list(found)[: self.max_candidates_per_query]
 
     def _offer(self, mission: ProductMission, url: str, page: str, query: str) -> Offer | None:
         products = _jsonld_products(page)
@@ -179,19 +208,19 @@ class PromScout(CatalogScout):
     search_templates = ("https://prom.ua/ua/search?search_term={q}", "https://prom.ua/ua/search?search_term={q}&sort=score")
 
 class AlloScout(CatalogScout):
-    marketplace = Marketplace.ALLO; host = "allo.ua"; product_path_hints = (".html",)
+    marketplace = Marketplace.ALLO; host = "allo.ua"; product_path_hints = (".html",); external_fallback = True
     search_templates = ("https://allo.ua/ua/catalogsearch/result/?q={q}", "https://allo.ua/ua/catalogsearch/result/?q={q}&cat=")
 
 class FoxtrotScout(CatalogScout):
-    marketplace = Marketplace.FOXTROT; host = "foxtrot.com.ua"; product_path_hints = ("/shop/", ".html")
+    marketplace = Marketplace.FOXTROT; host = "foxtrot.com.ua"; product_path_hints = ("/shop/", ".html"); external_fallback = True
     search_templates = ("https://www.foxtrot.com.ua/uk/search?query={q}", "https://www.foxtrot.com.ua/uk/search?search={q}")
 
 class ComfyScout(CatalogScout):
-    marketplace = Marketplace.COMFY; host = "comfy.ua"; product_path_hints = (".html",)
+    marketplace = Marketplace.COMFY; host = "comfy.ua"; product_path_hints = (".html",); external_fallback = True
     search_templates = ("https://comfy.ua/ua/search/?q={q}", "https://comfy.ua/ua/search?q={q}")
 
 class KastaScout(CatalogScout):
-    marketplace = Marketplace.KASTA; host = "kasta.ua"; allow_subdomains = True
+    marketplace = Marketplace.KASTA; host = "kasta.ua"; allow_subdomains = True; external_fallback = True
     search_templates = ("https://kasta.ua/uk/search/?q={q}", "https://kasta.ua/uk/search?q={q}")
 
 class HotlineScout(CatalogScout):
