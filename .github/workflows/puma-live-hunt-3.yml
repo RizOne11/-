@@ -15,38 +15,25 @@ jobs:
           pip install pytest httpx
       - name: Run PUMA test suite
         run: python -m pytest -q
-      - name: Probe exact indexed discovery
+      - name: Probe native Rozetka search API
         env:
           PUMA_PRODUCT: P27QCB-RA
         run: |
           python - <<'PY'
-          import html, re, urllib.parse
+          import json, os
           import httpx
-
-          product = 'P27QCB-RA'
-          headers = {'User-Agent': 'Mozilla/5.0'}
-          queries = [
-              f'site:hard.rozetka.com.ua "{product}"',
-              f'site:rozetka.com.ua "{product}"',
-          ]
-          for query in queries:
-              q = urllib.parse.quote_plus(query)
-              urls = [
-                  f'https://www.bing.com/search?q={q}&format=rss',
-                  f'https://www.google.com/search?q={q}&num=20&filter=0',
-                  f'https://html.duckduckgo.com/html/?q={q}',
-              ]
-              for url in urls:
-                  try:
-                      r = httpx.get(url, headers=headers, follow_redirects=True, timeout=20)
-                      print('ENGINE', url.split('/')[2], 'STATUS', r.status_code, 'LEN', len(r.text))
-                      text = html.unescape(r.text).replace('\\u002F','/').replace('\\/','/')
-                      hits = re.findall(r'https?://(?:hard\.)?rozetka\.com\.ua/(?:ua/|ru/)?[^\s"\'<>]*?/p\d+/?', urllib.parse.unquote(text), re.I)
-                      exact = [u for u in hits if product.lower().replace('-','') in re.sub(r'[^a-z0-9]+','',u.lower())]
-                      print('EXACT_URL_HITS', exact[:10])
-                      if product.lower() in text.lower():
-                          idx = text.lower().find(product.lower())
-                          print('MODEL_CONTEXT', re.sub(r'\s+',' ',text[max(0,idx-400):idx+700])[:1100])
-                  except Exception as exc:
-                      print('ENGINE_ERROR', type(exc).__name__, str(exc))
+          product = os.environ['PUMA_PRODUCT']
+          url = 'https://search.rozetka.com.ua/ua/search/api/v6/'
+          params = {'text': product, 'page': 1, 'front-type': 'xl', 'country': 'UA', 'lang': 'ua'}
+          headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://rozetka.com.ua/', 'Accept': 'application/json, text/plain, */*'}
+          r = httpx.get(url, params=params, headers=headers, follow_redirects=True, timeout=20)
+          print('NATIVE_SEARCH_STATUS', r.status_code)
+          print('NATIVE_SEARCH_URL', r.url)
+          print('NATIVE_SEARCH_BODY', r.text[:20000])
+          try:
+              payload = r.json()
+              print('HAS_CONTROL_ID', '592071073' in json.dumps(payload, ensure_ascii=False))
+              print('HAS_CONTROL_MODEL', product.casefold() in json.dumps(payload, ensure_ascii=False).casefold())
+          except Exception as exc:
+              print('NATIVE_SEARCH_JSON_ERROR', type(exc).__name__, str(exc))
           PY
