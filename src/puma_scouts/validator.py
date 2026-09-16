@@ -57,21 +57,17 @@ def _brand_match(expected: str | None, offer_text: str) -> bool:
 
 
 _TYPE_GROUPS = {"case":{"футляр","кейс","органайзер","чохол","чехол"},"strap":{"ремінець","ремешок","браслет"},"hammer":{"молоток"},"pencils":{"карандаш","карандаши","олівець","олівці"},"headset":{"гарнитура","навушники","наушники"},"speaker":{"колонка","speaker"},"gas":{"баллон","балон"},"power":{"система","станция","станція","енергообеспечения","живлення"}}
-
 def _type_groups(text: str) -> set[str]:
     tokens=_tokens(text); return {g for g,w in _TYPE_GROUPS.items() if tokens&w}
-
 def _type_conflict(source_text: str, offer_text: str) -> str | None:
     a,b=_type_groups(source_text),_type_groups(offer_text)
     return f"product type mismatch: expected {sorted(a)}, got {sorted(b)}" if a and b and a.isdisjoint(b) else None
-
 def _pack_count(text: str) -> int | None:
     norm=_norm(text)
     for pattern in (r"\b(\d{1,3})\s*(?:шт|штук|pcs|pieces)\b",r"\b(?:набор|комплект|упаковка)\s+(?:из\s+)?(\d{1,3})\b"):
         m=re.search(pattern,norm,re.I)
         if m and int(m.group(1))>1: return int(m.group(1))
     return None
-
 def _quantity_conflict(source_text: str, offer_text: str, *, strong_identity: bool=False) -> str | None:
     expected=_pack_count(source_text)
     if not expected: return None
@@ -79,12 +75,10 @@ def _quantity_conflict(source_text: str, offer_text: str, *, strong_identity: bo
     if actual is not None and actual != expected: return f"pack quantity mismatch: expected {expected}, got {actual}"
     if actual is None and not strong_identity: return f"pack quantity not confirmed: expected {expected}"
     return None
-
 def _key_measurements(text: str) -> set[tuple[str,str]]:
     norm=_norm(text); aliases={"г":"g","гр":"g","g":"g","кг":"kg","kg":"kg","вт":"w","w":"w","мм":"mm","mm":"mm","мл":"ml","ml":"ml"}; out=set()
     for value,unit in re.findall(r"\b(\d+(?:[.,]\d+)?)\s*(кг|kg|гр|г|g|вт|w|мм|mm|мл|ml)\b",norm,re.I): out.add((value.replace(",","."),aliases[unit.casefold()]))
     return out
-
 def _measurement_conflict(source_text: str, offer_text: str) -> str | None:
     expected,actual=_key_measurements(source_text),_key_measurements(offer_text)
     for value,unit in expected:
@@ -99,11 +93,16 @@ def validate_offer(mission: ProductMission, offer: Offer) -> ValidatedOffer:
     identifiers=extract_identifiers(mission); matched_ids=[i for i in identifiers if _strong_identifier(i) and _compact(i) and _compact(i) in _compact(offer_text)]
     expected_model=_explicit_model(mission); model_match=_model_match(expected_model,offer_text); expected_brand=_explicit_brand(mission); brand_match=_brand_match(expected_brand,offer_text)
     strong_identity=bool(matched_ids or model_match)
-    problems=[_type_conflict(source_text,offer_text),_quantity_conflict(source_text,offer_text,strong_identity=strong_identity),_measurement_conflict(source_text,offer_text),None if brand_match else f"brand not confirmed: {expected_brand}"]
+    # Marketplace titles often expose a sub-brand (e.g. Redmi) while the source uses
+    # the parent brand (Xiaomi). An exact model/MPN/GTIN is stronger identity evidence
+    # than a missing parent-brand token. Brand mismatch remains blocking for fuzzy-only matches.
+    brand_problem = None if (brand_match or strong_identity) else f"brand not confirmed: {expected_brand}"
+    problems=[_type_conflict(source_text,offer_text),_quantity_conflict(source_text,offer_text,strong_identity=strong_identity),_measurement_conflict(source_text,offer_text),brand_problem]
     conflicts=[p for p in problems if p]; positive=[]
     if matched_ids: positive.append("strong identifier match: "+", ".join(matched_ids[:4]))
     if model_match: positive.append("explicit model match: "+str(expected_model))
     if expected_brand and brand_match: positive.append("brand match: "+expected_brand)
+    if expected_brand and not brand_match and strong_identity: positive.append("brand token absent but exact identity confirmed")
     if overlap>=.35: positive.append(f"source token overlap={overlap:.2f}")
     if conflicts: score=min(.64,.20+overlap); verdict=Verdict.CONFLICT if overlap>=.18 else Verdict.REJECT
     elif expected_model and not model_match:
