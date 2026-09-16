@@ -39,36 +39,42 @@ jobs:
           async def main(): print('PUMA_MULTIMARKET_RESULTS='+json.dumps(await asyncio.gather(*(one(s) for s in scouts)),ensure_ascii=False))
           asyncio.run(main())
           PY
-      - name: Probe independent Ukrainian shops
+      - name: Probe Zakupka and Google discovery
         run: |
           python - <<'PY'
-          # Diagnostic for the WEB_SHOPS lane: free server-side engines only.
-          # We exclude known PUMA sources so results represent independent shops.
           import asyncio,re
-          from urllib.parse import quote_plus,urlsplit,parse_qs,unquote
+          from urllib.parse import quote_plus,urlsplit,parse_qs
           import httpx
           from bs4 import BeautifulSoup
-          q='"Xiaomi Redmi A27Q 2025" "P27QCB-RA" -site:prom.ua -site:epicentrk.ua -site:hotline.ua -site:rozetka.com.ua -site:zakupka.com'
-          engines=[('ddg','https://html.duckduckgo.com/html/?q='+quote_plus(q)),('bing','https://www.bing.com/search?q='+quote_plus(q)+'&count=30&setlang=uk'),('brave','https://search.brave.com/search?q='+quote_plus(q)+'&source=web')]
-          blocked={'duckduckgo.com','bing.com','www.bing.com','search.brave.com','google.com','www.google.com','prom.ua','epicentrk.ua','hotline.ua','rozetka.com.ua','zakupka.com','youtube.com','facebook.com','instagram.com'}
+          query='Xiaomi Redmi A27Q 2025 P27QCB-RA'
+          zakupka=[
+            'https://zakupka.com/uk/search/?q='+quote_plus(query),
+            'https://zakupka.com/search/?q='+quote_plus(query),
+            'https://zakupka.com/uk/search?search_term='+quote_plus(query),
+          ]
+          google='https://www.google.com/search?hl=uk&gl=ua&num=20&q='+quote_plus('"Xiaomi Redmi A27Q 2025" "P27QCB-RA" -site:prom.ua -site:epicentrk.ua -site:hotline.ua -site:rozetka.com.ua -site:zakupka.com')
+          blocked=('google.','gstatic.','googleusercontent.','youtube.','facebook.','instagram.','prom.ua','epicentrk.ua','hotline.ua','rozetka.com.ua','zakupka.com')
           async def main():
-            headers={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36','Accept-Language':'uk-UA,uk;q=0.9,en;q=0.8'}; found={}
+            headers={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36','Accept-Language':'uk-UA,uk;q=0.9,en;q=0.8'}
             async with httpx.AsyncClient(timeout=15,follow_redirects=True,headers=headers) as c:
-              for name,url in engines:
-                try: text=(await c.get(url)).text
-                except Exception as e: print('PUMA_WEB_ENGINE',name,'ERROR',type(e).__name__); continue
-                soup=BeautifulSoup(text,'html.parser'); urls=[]
-                for a in soup.find_all('a',href=True):
-                  x=a['href']; p=urlsplit(x)
-                  if 'duckduckgo.com' in p.netloc and p.path.startswith('/l/'):
-                    w=parse_qs(p.query).get('uddg',[]); x=unquote(w[0]) if w else x
+              for u in zakupka:
+                try:
+                  r=await c.get(u); text=r.text.replace('\\/','/'); links=[]
+                  for x in re.findall(r'https?://[^\"\'<>\\\s]+|/[^\"\'<>\\\s]+',text):
+                    if 'zakupka.com' in x or x.startswith('/'):
+                      if any(k in x.lower() for k in ('search','catalog','product','tovar','p/','.html')): links.append(x[:250])
+                  print('PUMA_ZAKUPKA_PROBE',r.status_code,len(text),str(r.url),'links=',list(dict.fromkeys(links))[:15])
+                except Exception as e: print('PUMA_ZAKUPKA_PROBE ERROR',type(e).__name__,e)
+              try:
+                r=await c.get(google); text=r.text.replace('\\/','/'); found={}
+                for a in BeautifulSoup(text,'html.parser').find_all('a',href=True):
+                  x=a['href']
+                  if x.startswith('/url?'):
+                    x=parse_qs(urlsplit(x).query).get('q',[''])[0]
+                  if not x.startswith('http'): continue
                   h=urlsplit(x).netloc.lower().removeprefix('www.')
-                  if x.startswith('http') and h and h not in blocked and not any(h.endswith('.'+b) for b in blocked): urls.append(x)
-                for x in re.findall(r'https?://[^\"\'<>\\\s]+',text.replace('\\/','/')):
-                  h=urlsplit(x).netloc.lower().removeprefix('www.')
-                  if h and h not in blocked: urls.append(x.rstrip('.,);]'))
-                for x in urls: found.setdefault(urlsplit(x).netloc.lower().removeprefix('www.'),x)
-                print('PUMA_WEB_ENGINE',name,'bytes',len(text),'domains',list(found)[:12])
-            print('PUMA_WEB_SHOPS='+str(list(found.items())[:20]))
+                  if h and not any(b in h for b in blocked): found.setdefault(h,x)
+                print('PUMA_GOOGLE_PROBE',r.status_code,len(text),str(r.url),'shops=',list(found.items())[:20])
+              except Exception as e: print('PUMA_GOOGLE_PROBE ERROR',type(e).__name__,e)
           asyncio.run(main())
           PY
