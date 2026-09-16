@@ -1,0 +1,92 @@
+name: PUMA Epicentr Batch Hunt
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/puma-epicentr-batch-hunt.yml'
+
+jobs:
+  batch-hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PUMA Scout
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+      - name: Run tests
+        run: pytest -q
+      - name: Run real-product Epicentr batch
+        run: |
+          python - <<'PY'
+          import asyncio, json
+          from pathlib import Path
+          from puma_scouts.models import ProductMission
+          from puma_scouts.scouts.epicentr import EpicentrScout
+
+          # Real products taken from the user's PUMA Excel. Supplier articles are
+          # intentionally NOT supplied to discovery; every mission gets a fake article.
+          PRODUCTS = [
+              {"name": "Молоток Polax слесарный c ручкой из дерева 1000 г DIN 1041", "brand": "Polax"},
+              {"name": "Дорожный футляр для часов Clockhouse 97x157x68 мм Коричневый", "brand": "Clockhouse"},
+              {"name": "Набор цветных карандашей Urbankit KALOUR 180 шт Разноцветный", "brand": "Urbankit", "model": "KALOUR 180"},
+              {"name": "Дорожный футляр для часов Clockhouse 97x157x68 мм Синий", "brand": "Clockhouse"},
+              {"name": "Гарнитура JBL C50HI Red", "brand": "JBL", "model": "C50HI"},
+              {"name": "Портативная колонка No Brand Resonance Speaker 3 Вт Черный"},
+              {"name": "Баллон газовый универсальный X-Treme 227 г 20 шт", "brand": "X-Treme"},
+              {"name": "Система энергообеспечения EcoFlow STREAM Ultra X", "brand": "EcoFlow", "model": "STREAM Ultra X"},
+          ]
+
+          async def scan_one(index, product):
+              mission = ProductMission(article=f"BATCH-CONTROL-{index:02d}", source_data=product)
+              scout = EpicentrScout(timeout=20.0, max_candidates_per_query=20)
+              queries = await scout.generate_queries(mission)
+              if any(mission.article.casefold() in q.casefold() for q in queries):
+                  raise RuntimeError(f"supplier article leaked for item {index}")
+              report = await scout.scan(mission)
+              passes = [x for x in report.offers if x.verdict.value == "PASS"]
+              best = max(passes, key=lambda x: x.score, default=None)
+              result = {
+                  "index": index,
+                  "input": product,
+                  "health": report.health.value,
+                  "queries": queries,
+                  "pages_scanned": report.pages_scanned,
+                  "candidates_seen": report.candidates_seen,
+                  "pass_count": len(passes),
+                  "best": best.model_dump(mode="json") if best else None,
+                  "errors": report.errors,
+              }
+              print("PUMA BATCH ITEM:", json.dumps(result, ensure_ascii=False))
+              return result
+
+          async def main():
+              results = []
+              # Sequential on purpose: be polite to Epicentr and make failures diagnosable.
+              for i, product in enumerate(PRODUCTS, 1):
+                  results.append(await scan_one(i, product))
+              summary = {
+                  "total": len(results),
+                  "found": sum(1 for r in results if r["best"]),
+                  "not_found": sum(1 for r in results if not r["best"]),
+                  "items": results,
+              }
+              Path("puma-epicentr-batch.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+              print("PUMA BATCH SUMMARY:", json.dumps({"total": summary["total"], "found": summary["found"], "not_found": summary["not_found"]}, ensure_ascii=False))
+
+          asyncio.run(main())
+          PY
+      - name: Upload batch report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: puma-epicentr-batch-${{ github.run_number }}
+          path: puma-epicentr-batch.json
+          if-no-files-found: warn
