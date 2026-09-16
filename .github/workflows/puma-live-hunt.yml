@@ -1,9 +1,7 @@
 name: PUMA Live Hunt
 
+# Rozetka is intentionally frozen: keep the workflow for later, but do not run it on pushes.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
@@ -28,20 +26,13 @@ jobs:
           from pathlib import Path
           from puma_scouts.models import ProductMission
           from puma_scouts.scouts.rozetka import RozetkaScout
-
           product = os.environ['PUMA_PRODUCT']
-          print(f'PUMA LIVE HUNT START product={product}')
-
           async def main():
-              mission = ProductMission(article=product, source_data={"model": product})
+              mission = ProductMission(article=product, source_data={'model': product})
               report = await RozetkaScout(timeout=20.0).scan(mission)
               payload = report.model_dump(mode='json')
-              Path('puma-live-hunt.json').write_text(
-                  json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8'
-              )
-              print('PUMA LIVE HUNT RESULT')
+              Path('puma-live-hunt.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
               print(json.dumps(payload, ensure_ascii=False, indent=2))
-
           asyncio.run(main())
           PY
       - name: Upload hunt report
