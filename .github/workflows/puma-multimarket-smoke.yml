@@ -1,6 +1,6 @@
 name: PUMA Multimarket Smoke
 
-# Primary PUMA live CI: active marketplaces only. Rozetka remains frozen separately.
+# Active PUMA sources. Rozetka is frozen; Foxtrot and Kasta are intentionally dropped.
 on:
   workflow_dispatch:
   push:
@@ -13,7 +13,7 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,40 +23,28 @@ jobs:
         run: pip install -e . pytest pytest-asyncio
       - name: Tests
         run: pytest -q
-      - name: Diagnose zero-source discovery
+      - name: Probe Allo native search
         run: |
           python - <<'PY'
           import asyncio, re
           from urllib.parse import quote_plus
           import httpx
-
-          stores = {
-              'allo': 'allo.ua',
-              'foxtrot': 'foxtrot.com.ua',
-              'comfy': 'comfy.ua',
-              'kasta': 'kasta.ua',
-          }
-          query = 'Xiaomi Redmi A27Q 2025 P27QCB-RA'
-
-          async def probe(name, domain):
-              url = 'https://www.google.com/search?q=' + quote_plus(f'site:{domain} {query}')
-              headers = {'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36','Accept-Language':'uk-UA,uk;q=0.9,en;q=0.8'}
-              try:
-                  async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=headers) as client:
-                      r = await client.get(url)
-                  text = r.text
-                  urls = []
-                  for raw in re.findall(r'https?://[^\s\"<>]+', text):
-                      clean = raw.replace('&amp;', '&').split('&ved=')[0]
-                      if domain in clean and clean not in urls:
-                          urls.append(clean[:300])
-                  print(f'PUMA_DISCOVERY_DIAG store={name} status={r.status_code} bytes={len(text)} final={r.url} domain_mentions={text.lower().count(domain)} urls={urls[:8]}')
-                  print(f'PUMA_DISCOVERY_SNIP store={name} text={re.sub(r"\\s+", " ", text[:500])}')
-              except Exception as exc:
-                  print(f'PUMA_DISCOVERY_DIAG store={name} ERROR={type(exc).__name__}:{exc}')
-
+          query='Xiaomi Redmi A27Q 2025 P27QCB-RA'
+          urls=[
+            'https://allo.ua/ua/catalogsearch/result/?q='+quote_plus(query),
+            'https://allo.ua/ua/catalogsearch/result/index/?q='+quote_plus(query),
+          ]
           async def main():
-              await asyncio.gather(*(probe(n,d) for n,d in stores.items()))
+            headers={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36','Accept-Language':'uk-UA,uk;q=0.9,en;q=0.8'}
+            async with httpx.AsyncClient(timeout=15,follow_redirects=True,headers=headers) as c:
+              for url in urls:
+                try:
+                  r=await c.get(url); text=r.text.replace('\\/','/')
+                  product_urls=[]
+                  for raw in re.findall(r'https?://[^\\s\"<>]+|/ua/[^\\s\"<>]+?\.html',text):
+                    if '.html' in raw and raw not in product_urls: product_urls.append(raw[:300])
+                  print('PUMA_ALLO_PROBE',r.status_code,len(text),str(r.url),'html_links=',product_urls[:10],'nuxt=',('_nuxt' in text),'graphql=',('graphql' in text.lower()))
+                except Exception as e: print('PUMA_ALLO_PROBE ERROR',type(e).__name__,e)
           asyncio.run(main())
           PY
       - name: Live marketplace smoke
@@ -66,9 +54,9 @@ jobs:
           from collections import Counter
           from puma_scouts.models import ProductMission, Verdict
           from puma_scouts.scouts.epicentr import EpicentrScout
-          from puma_scouts.scouts.catalog import PromScout, AlloScout, FoxtrotScout, ComfyScout, KastaScout, HotlineScout
+          from puma_scouts.scouts.catalog import PromScout, AlloScout, ComfyScout, HotlineScout
           mission = ProductMission(article='SMOKE-CONTROL', source_data={'name':'Монитор Xiaomi Redmi A27Q 2025 P27QCB-RA 2560x1440 2K IPS 100 Гц 27 Черный','brand':'Xiaomi','model':'P27QCB-RA'})
-          scouts = [EpicentrScout(timeout=15,max_candidates_per_query=12),PromScout(timeout=15,max_candidates_per_query=12),AlloScout(timeout=15,max_candidates_per_query=12),FoxtrotScout(timeout=15,max_candidates_per_query=12),ComfyScout(timeout=15,max_candidates_per_query=12),KastaScout(timeout=15,max_candidates_per_query=12),HotlineScout(timeout=15,max_candidates_per_query=12)]
+          scouts = [EpicentrScout(timeout=15,max_candidates_per_query=12),PromScout(timeout=15,max_candidates_per_query=12),AlloScout(timeout=15,max_candidates_per_query=12),ComfyScout(timeout=15,max_candidates_per_query=12),HotlineScout(timeout=15,max_candidates_per_query=12)]
           async def one(scout):
               report = await scout.scan(mission)
               passes = sorted([x for x in report.offers if x.verdict == Verdict.PASS], key=lambda x:x.score, reverse=True)
@@ -79,4 +67,3 @@ jobs:
               print('PUMA_MULTIMARKET_RESULTS=' + json.dumps(rows, ensure_ascii=False))
           asyncio.run(main())
           PY
-# primary-ci-v4: zero-source discovery diagnostics
