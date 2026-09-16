@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import html as html_lib
 import json
 import re
@@ -9,6 +8,7 @@ from typing import Any
 from urllib.parse import quote_plus, urljoin, urlsplit, urlunsplit
 
 import httpx
+from bs4 import BeautifulSoup
 
 from puma_scouts.models import Marketplace, Offer, ProductMission, ScanHealth, ScanReport, Verdict
 from puma_scouts.query import generate_queries
@@ -25,8 +25,7 @@ def _clean(value: Any) -> str:
 
 def _canonical_url(url: str) -> str:
     parts = urlsplit(url)
-    path = re.sub(r"^/ua/", "/ua/", parts.path, flags=re.I)
-    return urlunsplit(("https", parts.netloc.lower(), path, "", ""))
+    return urlunsplit(("https", parts.netloc.lower(), parts.path, "", ""))
 
 
 def _is_product_url(url: str) -> bool:
@@ -50,10 +49,14 @@ def _jsonld_products(html: str) -> list[dict[str, Any]]:
     products: list[dict[str, Any]] = []
     pattern = r'<script\b[^>]*\btype\s*=\s*["\']application/ld\+json["\'][^>]*>(.*?)</script\s*>'
     for raw in re.findall(pattern, html, flags=re.I | re.S):
-        raw = html_lib.unescape(raw).strip()
-        try:
-            payload = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+        payload = None
+        for candidate in (raw.strip(), html_lib.unescape(raw).strip()):
+            try:
+                payload = json.loads(candidate)
+                break
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if payload is None:
             continue
         queue = payload if isinstance(payload, list) else [payload]
         for item in queue:
@@ -68,20 +71,52 @@ def _jsonld_products(html: str) -> list[dict[str, Any]]:
 
 
 def _meta(html: str, key: str) -> str | None:
+    soup = BeautifulSoup(html, "html.parser")
+    tag = soup.find("meta", attrs={"property": key}) or soup.find("meta", attrs={"name": key})
+    if tag and tag.get("content"):
+        return _clean(tag.get("content"))
+    return None
+
+
+def _extract_embedded_price(html: str) -> Decimal | None:
     patterns = [
-        rf'<meta[^>]+(?:property|name)=["\']{re.escape(key)}["\'][^>]+content=["\']([^"\']+)',
-        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']{re.escape(key)}["\']',
+        r'"(?:price|currentPrice|finalPrice|priceValue|productPrice)"\s*:\s*(?:"|\{[^{}]{0,100}?"value"\s*:\s*")?([0-9][0-9\s.,]{1,15})',
+        r'(?:data-price|itemprop=["\']price["\'])[^>]{0,120}?(?:content|value)?\s*=\s*["\']([0-9][0-9\s.,]{1,15})',
+        r'([0-9][0-9\s]{2,10})\s*(?:₴|грн)',
     ]
     for pattern in patterns:
-        match = re.search(pattern, html, flags=re.I)
+        for match in re.finditer(pattern, html, flags=re.I | re.S):
+            price = _decimal_price(match.group(1))
+            if price and price >= 10:
+                return price
+    return None
+
+
+def _extract_seller(html: str) -> str | None:
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+    for label in ("Продавець товару", "Продавец товара", "Продавець", "Продавец"):
+        match = re.search(re.escape(label) + r"\s*:?\s*([^|•]{2,80}?)(?=\s+(?:Інші|Другие|Всі|Все|Код|Артикул|$))", text, flags=re.I)
         if match:
-            return _clean(match.group(1))
+            seller = _clean(match.group(1))
+            if seller and "товар" not in seller.casefold():
+                return seller
+    for pattern in (
+        r'"sellerName"\s*:\s*"([^"]{2,100})"',
+        r'"merchantName"\s*:\s*"([^"]{2,100})"',
+        r'"seller"\s*:\s*\{[^{}]{0,500}?"name"\s*:\s*"([^"]{2,100})"',
+    ):
+        match = re.search(pattern, html, flags=re.I | re.S)
+        if match:
+            seller = _clean(match.group(1))
+            if seller.casefold() not in {"другие товары продавца", "інші товари продавця"}:
+                return seller
     return None
 
 
 def _offer_from_page(article: str, url: str, html: str, query: str) -> Offer | None:
     title = _meta(html, "og:title") or ""
-    price = _decimal_price(_meta(html, "product:price:amount"))
+    price = _decimal_price(_meta(html, "product:price:amount") or _meta(html, "og:price:amount"))
     availability: str | None = None
     seller_name: str | None = None
     attrs: dict[str, Any] = {"source": "epicentr-product-page"}
@@ -109,20 +144,25 @@ def _offer_from_page(article: str, url: str, html: str, query: str) -> Offer | N
                 seller_name = _clean(seller.get("name")) or None
 
     if not title:
-        match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.I | re.S)
-        title = _clean(re.sub(r"<[^>]+>", " ", match.group(1))) if match else ""
+        soup = BeautifulSoup(html, "html.parser")
+        title = _clean(soup.title.string if soup.title else "")
     if not title:
         return None
 
-    if not seller_name:
-        match = re.search(r"(?:Продавець товару|Продавец|Продавець)\s*:?</?[^>]*>?(?:\s*<[^>]+>)*\s*([^<\n]{2,100})", html, flags=re.I)
-        if match:
-            seller_name = _clean(match.group(1)) or None
+    price = price or _extract_embedded_price(html)
+    seller_name = seller_name or _extract_seller(html)
 
     product_id = None
-    code = re.search(r"(?:КОД|Код)\s*(?:&nbsp;|\s)*([A-ZА-ЯІЇЄ0-9-]{5,})", html, flags=re.I)
-    if code:
-        product_id = code.group(1)
+    for pattern in (
+        r'(?:КОД|Код|КОД ТОВАРУ|Код товару)\s*(?:&nbsp;|\s|<[^>]+>)*([A-ZА-ЯІЇЄ0-9-]{5,})',
+        r'"(?:productCode|sku)"\s*:\s*"([A-ZА-ЯІЇЄ0-9-]{5,})"',
+    ):
+        code = re.search(pattern, html, flags=re.I)
+        if code:
+            candidate = code.group(1)
+            if candidate.casefold() not in {"женого", "товару"}:
+                product_id = candidate
+                break
 
     return Offer(article=article, marketplace=Marketplace.EPICENTR, marketplace_product_id=product_id,
         seller_name=seller_name, title=title, price=price, availability=availability,
@@ -139,10 +179,19 @@ class EpicentrScout(MarketplaceScout):
         self.headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36", "Accept-Language": "uk-UA,uk;q=0.9,ru;q=0.7,en;q=0.5"}
 
     async def generate_queries(self, mission: ProductMission) -> list[str]:
-        queries = generate_queries(mission)
         article = mission.article.casefold().strip()
-        non_article = [q for q in queries if q.casefold().strip() != article]
-        return non_article or queries
+        queries = generate_queries(mission)
+        useful: list[str] = []
+        for query in queries:
+            q = query.strip()
+            if not q or q.casefold() == article:
+                continue
+            if re.fullmatch(r"(?:19|20)\d{2}", q):
+                continue
+            if article and article in q.casefold():
+                continue
+            useful.append(q)
+        return useful
 
     async def _get(self, client: httpx.AsyncClient, url: str) -> str:
         response = await client.get(url, headers=self.headers, follow_redirects=True)
