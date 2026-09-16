@@ -7,7 +7,7 @@ on:
     paths:
       - '.github/workflows/puma-epicentr-batch-hunt.yml'
 
-# trigger: 2026-09-16 hardened validator rerun
+# trigger: 2026-09-16 model suffix X fix
 jobs:
   batch-hunt:
     runs-on: ubuntu-latest
