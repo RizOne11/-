@@ -122,7 +122,7 @@ def _offer_from_page(article: str, url: str, html: str, query: str) -> Offer | N
     return Offer(article=article, marketplace=Marketplace.ROZETKA, marketplace_product_id=product_id,
         seller_name=_clean(attrs.pop("seller", "")) or None, title=title, price=price,
         availability=availability, url=_canonical_url(url), image_urls=[], attributes=attrs,
-        query_used=query, discovery_method="indexed-discovery->rozetka-product-page")
+        query_used=query, discovery_method="catalog/index->rozetka-product-page")
 
 
 def _offer_from_api(article: str, product_id: str, payload: dict[str, Any], query: str, fallback_url: str) -> Offer | None:
@@ -154,7 +154,7 @@ def _offer_from_api(article: str, product_id: str, payload: dict[str, Any], quer
         seller_name=seller_name, title=title, price=price, availability=availability,
         url=_canonical_url(str(url)) if _is_rozetka_product_url(str(url)) else _canonical_url(fallback_url),
         image_urls=[], attributes=attrs, query_used=query,
-        discovery_method="indexed-discovery->rozetka-product-api")
+        discovery_method="catalog/index->rozetka-product-api")
 
 
 def _extract_indexed_rozetka_urls(html: str) -> list[str]:
@@ -207,6 +207,43 @@ class RozetkaScout(MarketplaceScout):
         response.raise_for_status()
         return response.text
 
+    async def _catalog_candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
+        needle = _norm(query)
+        if not needle:
+            return []
+        # Category pages are useful for marketplace offers that Rozetka's text search does not index.
+        catalog_urls = [
+            "https://hard.rozetka.com.ua/ua/monitors/c80089/producer=xiaomi/",
+            "https://hard.rozetka.com.ua/ua/monitors/c80089/",
+        ]
+        found: dict[str, str] = {}
+        for catalog_url in catalog_urls:
+            try:
+                page = await self._get(client, catalog_url)
+            except httpx.HTTPError:
+                continue
+            decoded = html_lib.unescape(page).replace("\\u002F", "/").replace("\\/", "/")
+            for url in _extract_indexed_rozetka_urls(decoded):
+                pid = _product_id(url)
+                if pid:
+                    found.setdefault(pid, url)
+            # Some catalog HTML contains product IDs separately from titles/URLs. Capture local context.
+            lower_norm = _norm(decoded)
+            if needle in lower_norm:
+                for match in re.finditer(r"p\d+", decoded, flags=re.I):
+                    start, end = max(0, match.start() - 1200), min(len(decoded), match.end() + 1200)
+                    context = decoded[start:end]
+                    if needle not in _norm(context):
+                        continue
+                    pid_match = re.search(r"p(\d+)", match.group(0), flags=re.I)
+                    if pid_match:
+                        pid = pid_match.group(1)
+                        found.setdefault(pid, f"https://hard.rozetka.com.ua/ua/p{pid}/p{pid}/")
+            exact = [u for u in found.values() if needle in _norm(u)]
+            if exact:
+                return _rank_candidate_urls(exact, query)[:self.max_candidates_per_query]
+        return _rank_candidate_urls(list(found.values()), query)[:self.max_candidates_per_query]
+
     async def _api_offer(self, client: httpx.AsyncClient, article: str, url: str, query: str) -> Offer | None:
         pid = _product_id(url)
         if not pid:
@@ -217,11 +254,7 @@ class RozetkaScout(MarketplaceScout):
         return _offer_from_api(article, pid, response.json(), query, url)
 
     async def _indexed_candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
-        searches = [
-            f'site:rozetka.com.ua "{query}"',
-            f'site:hard.rozetka.com.ua "{query}"',
-            f'site:rozetka.com.ua {query}',
-        ]
+        searches = [f'site:rozetka.com.ua "{query}"', f'site:hard.rozetka.com.ua "{query}"', f'site:rozetka.com.ua {query}']
         found: dict[str, str] = {}
         last_error: httpx.HTTPError | None = None
         for search in searches:
@@ -229,19 +262,22 @@ class RozetkaScout(MarketplaceScout):
             engines = [f"https://html.duckduckgo.com/html/?q={q}", f"https://www.google.com/search?q={q}&num=20&filter=0", f"https://www.bing.com/search?q={q}&count=20"]
             for search_url in engines:
                 try:
-                    html = await self._get(client, search_url)
+                    page = await self._get(client, search_url)
                 except httpx.HTTPError as exc:
                     last_error = exc
                     continue
-                for url in _rank_candidate_urls(_extract_indexed_rozetka_urls(html), query):
+                for url in _rank_candidate_urls(_extract_indexed_rozetka_urls(page), query):
                     pid = _product_id(url)
                     if pid:
                         found.setdefault(pid, url)
                 exact = [url for url in found.values() if _norm(query) in _norm(urlsplit(url).path)]
                 if exact:
                     return _rank_candidate_urls(exact, query)[:self.max_candidates_per_query]
-                if len(found) >= self.max_candidates_per_query:
-                    return _rank_candidate_urls(list(found.values()), query)[:self.max_candidates_per_query]
+        catalog = await self._catalog_candidate_urls(client, query)
+        for url in catalog:
+            pid = _product_id(url)
+            if pid:
+                found.setdefault(pid, url)
         if found:
             return _rank_candidate_urls(list(found.values()), query)[:self.max_candidates_per_query]
         if last_error:
@@ -251,10 +287,10 @@ class RozetkaScout(MarketplaceScout):
     async def _candidate_urls(self, client: httpx.AsyncClient, query: str) -> list[str]:
         search_url = f"https://rozetka.com.ua/ua/search/?text={quote_plus(query)}"
         try:
-            html = await self._get(client, search_url)
+            page = await self._get(client, search_url)
             urls: list[str] = []
             seen: set[str] = set()
-            for href in re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.I):
+            for href in re.findall(r'href=["\']([^"\']+)["\']', page, flags=re.I):
                 absolute = urljoin(search_url, href.replace("&amp;", "&"))
                 if not _is_rozetka_product_url(absolute):
                     continue
@@ -272,8 +308,8 @@ class RozetkaScout(MarketplaceScout):
 
     async def _fetch_offer(self, client: httpx.AsyncClient, mission: ProductMission, url: str, query: str) -> Offer | None:
         try:
-            html = await self._get(client, url)
-            offer = _offer_from_page(mission.article, url, html, query)
+            page = await self._get(client, url)
+            offer = _offer_from_page(mission.article, url, page, query)
             if offer:
                 return offer
         except httpx.HTTPError:
