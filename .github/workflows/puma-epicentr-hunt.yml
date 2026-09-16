@@ -1,7 +1,7 @@
 name: PUMA Epicentr Hunt
+
+# Legacy single-market diagnostic. Multimarket Smoke is the active CI path.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -16,8 +16,7 @@ jobs:
       - name: Install PUMA Scout
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
-          pip install pytest
+          pip install -e . pytest
       - name: Run tests
         run: pytest -q
       - name: Run live Epicentr hunt
@@ -27,27 +26,12 @@ jobs:
           from pathlib import Path
           from puma_scouts.models import ProductMission
           from puma_scouts.scouts.epicentr import EpicentrScout
-
-          # Control mission uses product identity fields. Supplier article is intentionally unrelated
-          # so the live test proves discovery is not dependent on Hubber article equality.
-          mission = ProductMission(
-              article="CONTROL-NOT-A-SEARCH-KEY",
-              source_data={
-                  "name": "Монітор Redmi A27Q 2025 з багатофункціональною підставкою",
-                  "brand": "Redmi",
-                  "model": "P27QCB-RA",
-              },
-          )
-
+          mission = ProductMission(article='CONTROL-NOT-A-SEARCH-KEY', source_data={'name':'Монітор Redmi A27Q 2025 з багатофункціональною підставкою','brand':'Redmi','model':'P27QCB-RA'})
           async def main():
               report = await EpicentrScout(timeout=20.0).scan(mission)
-              payload = report.model_dump(mode="json")
-              Path("puma-epicentr-hunt.json").write_text(
-                  json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-              )
-              print("PUMA EPICENTR HUNT RESULT")
+              payload = report.model_dump(mode='json')
+              Path('puma-epicentr-hunt.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
               print(json.dumps(payload, ensure_ascii=False, indent=2))
-
           asyncio.run(main())
           PY
       - name: Upload hunt report
